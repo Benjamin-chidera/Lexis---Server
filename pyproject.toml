@@ -1,0 +1,35 @@
+[project]
+name = "server"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiofiles>=25.1.0",
+    "chromadb==0.5.23",
+    "crewai==0.80.0",
+    "crewai-tools>=0.76.0",
+    "fastapi[standard]>=0.136.1",
+    "lancedb==0.25.3",
+    "langchain-community>=0.4.1",
+    "langchain-ollama>=1.1.0",
+    "langchain-openai>=1.2.1",
+    "langchain-pinecone>=0.2.13",
+    "langchain-tavily>=0.2.18",
+    "langgraph>=1.1.10",
+    "onnxruntime==1.19.2",
+    "pillow>=12.2.0",
+    "pypdf>=6.10.2",
+    "python-dotenv>=1.2.2",
+    "python-socketio>=5.16.1",
+    "requests>=2.33.1",
+    "setuptools>=82.0.1",
+    "sqlmodel>=0.0.38",
+    "uvicorn[standard]>=0.46.0",
+    "python-jose[cryptography]>=3.3.0",
+    "bcrypt>=4.0.0",
+    "psycopg2-binary>=2.9.12",
+    "rq>=2.8.0",
+    "redis>=7.4.0",
+    "rq-dashboard>=0.8.6",
+]

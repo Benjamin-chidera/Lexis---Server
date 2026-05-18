@@ -1,0 +1,31 @@
+fastapi[standard]
+langgraph
+# --- Intel Mac (x86_64) Compatibility Pins ---
+# crewai 1.x+ → lancedb 0.29+ → no Intel Mac wheel
+# crewai 1.x+ → chromadb 1.x+ → onnxruntime 1.24+ → no Intel Mac wheel
+# Pinning the full chain to the last compatible versions.
+crewai==0.80.0
+chromadb==0.5.23
+onnxruntime==1.19.2
+lancedb==0.25.3
+# -------------------------------------------------
+# setuptools provides pkg_resources, which crewai 0.80.0 imports in its telemetry.
+# Python 3.12 no longer bundles setuptools by default, so we must add it explicitly.
+setuptools
+langchain-openai
+python-dotenv
+uvicorn[standard]
+langchain-ollama
+langchain-community
+sqlmodel
+python-socketio
+aiofiles
+langchain-pinecone
+langchain-tavily
+pypdf
+pillow
+requests
+crewai-tools
+python-jose[cryptography]
+psycopg2-binary
+rq-dashboard
