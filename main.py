@@ -145,6 +145,9 @@ fastapi_app.include_router(files.router)
 fastapi_app.include_router(alerts.router)
 fastapi_app.include_router(messages.router)
 
+@fastapi_app.get("/")
+def root():
+    return {"message": "Legal Assistant Server is running"}
 
 # --- Socket.io event handlers ---
 
