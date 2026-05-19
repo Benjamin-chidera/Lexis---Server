@@ -11,4 +11,6 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY --from=builder /app/.venv .venv/
 COPY . .
-CMD ["/app/.venv/bin/fastapi", "run"]
+
+# Explicitly target main.py so the socketio ASGI app (main:app) is served
+CMD ["/app/.venv/bin/fastapi", "run", "main.py", "--host", "0.0.0.0", "--port", "8080"]

@@ -25,7 +25,7 @@ PUBSUB_CHANNEL = "research_done"
 
 # --- Socket.io setup ---
 
-sio = socketio.AsyncServer( 
+sio = socketio.AsyncServer(
     async_mode="asgi",
     cors_allowed_origins=[
         "http://localhost:5173",
@@ -34,10 +34,10 @@ sio = socketio.AsyncServer(
         "http://127.0.0.1:5173",
         "http://127.0.0.1:5174",
         "http://127.0.0.1:3000",
-        "https://lexis-pi.vercel.app/"
-        "https://lexis-pi.vercel.app/login"
+        # Production — no trailing slash; browsers send origin without it
+        "https://lexis-pi.vercel.app",
     ],
-) 
+)
 
 # Maps socket sid → user_id for the duration of a connection
 socket_sessions: dict[str, int] = {}
@@ -138,8 +138,8 @@ fastapi_app.add_middleware(
         "http://127.0.0.1:5173",
         "http://127.0.0.1:5174",
         "http://127.0.0.1:3000",
-        "https://lexis-pi.vercel.app/"
-        "https://lexis-pi.vercel.app/login"
+        # Production — no trailing slash; browsers send origin without it
+        "https://lexis-pi.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
