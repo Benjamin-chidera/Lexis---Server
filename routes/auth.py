@@ -10,6 +10,7 @@ from models import User
 from auth import (
     COOKIE_NAME,
     TOKEN_EXPIRE_DAYS,
+    IS_PRODUCTION,
     hash_password,
     verify_password,
     create_token,
@@ -142,7 +143,7 @@ def _make_auth_response(user: User) -> JSONResponse:
         key=COOKIE_NAME,
         value=token,
         httponly=True,
-        secure=False,
+        secure=IS_PRODUCTION,
         samesite="lax",
         max_age=TOKEN_EXPIRE_DAYS * 86400,
     )

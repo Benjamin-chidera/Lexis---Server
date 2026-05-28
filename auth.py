@@ -10,8 +10,12 @@ ALGORITHM = "HS256"
 TOKEN_EXPIRE_DAYS = 30
 COOKIE_NAME = "access_token"
 
-# Maps token string → user_id. Allows logout/session invalidation without waiting for JWT expiry.
-active_tokens: dict[str, int] = {}
+# True in production (HTTPS), False for local dev (HTTP)
+IS_PRODUCTION = os.getenv("ENVIRONMENT", "development") == "production"
+
+# Blocklist of tokens that were explicitly logged out.
+# Only used to reject tokens before their JWT expiry after logout.
+revoked_tokens: set[str] = set()
 
 
 def hash_password(password: str) -> str:
@@ -29,21 +33,32 @@ def create_token(user_id: int, role: str) -> str:
         "exp": datetime.utcnow() + timedelta(days=TOKEN_EXPIRE_DAYS),
     }
     token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
-    active_tokens[token] = user_id
     return token
 
 
 def invalidate_token(token: str) -> None:
-    active_tokens.pop(token, None)
+    """Add the token to the revoked blocklist so it can't be reused after logout."""
+    revoked_tokens.add(token)
 
 
 def get_current_user(request: Request) -> dict:
     access_token = request.cookies.get(COOKIE_NAME)
-    if not access_token or access_token not in active_tokens:
+
+    # No cookie at all
+    if not access_token:
         raise HTTPException(
             status_code=401,
             detail="Session expired or invalid. Please log in again.",
         )
+
+    # Token was explicitly logged out
+    if access_token in revoked_tokens:
+        raise HTTPException(
+            status_code=401,
+            detail="Session expired or invalid. Please log in again.",
+        )
+
+    # Validate the JWT signature and expiry
     try:
         payload = jwt.decode(access_token, SECRET_KEY, algorithms=[ALGORITHM])
         return {
@@ -52,7 +67,6 @@ def get_current_user(request: Request) -> dict:
             "token": access_token,
         }
     except JWTError:
-        active_tokens.pop(access_token, None)
         raise HTTPException(status_code=401, detail="Invalid token. Please log in again.")
 
 

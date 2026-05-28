@@ -21,7 +21,7 @@ from database import create_tables, engine
 from models import Case
 from routes import upload, cases, files, alerts, messages 
 from routes import auth as auth_router
-from auth import active_tokens, COOKIE_NAME, SECRET_KEY, ALGORITHM
+from auth import revoked_tokens, COOKIE_NAME, SECRET_KEY, ALGORITHM
 from ai.background import enqueue_research
 from ai.chat_handler import process_chat_message
 from ai.vector_store import ingest_pdf_into_vector_store, ingest_url_into_vector_store
@@ -183,20 +183,18 @@ async def connect(sid, environ, auth):
         print(f"[socket] Rejected — no token: {sid}")
         return False
 
-    # Check memory cache first
-    if token in active_tokens:
-        socket_sessions[sid] = active_tokens[token]
-        print(f"[socket] Client connected: {sid}, user_id: {active_tokens[token]}")
-        return True
+    # Check if token is revoked
+    if token in revoked_tokens:
+        print(f"[socket] Rejected — token is revoked: {sid}")
+        return False
 
     # Decode and restore JWT directly
     try:
         from jose import jwt as jose_jwt
         payload = jose_jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id = int(payload["sub"])
-        active_tokens[token] = user_id
         socket_sessions[sid] = user_id
-        print(f"[socket] Client reconnected: {sid}, user_id: {user_id}")
+        print(f"[socket] Client connected: {sid}, user_id: {user_id}")
         return True
     except Exception:
         print(f"[socket] Rejected invalid/expired token: {sid}")

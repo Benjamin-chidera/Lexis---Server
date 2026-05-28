@@ -33,4 +33,4 @@ worker.work(with_scheduler=False)
 # OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES rq worker --url redis://localhost:6379 legal
 
 # rq-dashboard --redis-url redis://localhost:6379
- 
+  
