@@ -2,13 +2,7 @@
 chat_handler.py
 
 Handles incoming chat messages from the Socket.IO client.
-
-chat_graph.invoke() is synchronous (LangChain/Ollama use blocking HTTP calls).
-We run it in a thread executor to avoid blocking the async event loop.
-
-ProgressEmitter lets synchronous graph nodes emit WebSocket "stage_update"
-events in real time (analyst → researcher → strategist) using
-asyncio.run_coroutine_threadsafe so they can schedule async emits from threads.
+Runs the synchronous chat_graph.invoke() in a thread executor to avoid blocking the event loop.
 """
 
 import json
@@ -19,12 +13,13 @@ from sqlmodel import Session, select
 from database import engine
 from models import Case, CaseMessage
 from .graph import chat_graph
+from ai.background import enqueue_research
 
 
 class ProgressEmitter:
     """
     Wraps sio/sid so synchronous graph nodes (running in a thread executor)
-    can emit real-time stage progress events to the client without awaiting.
+    can emit real-time stage progress events to the client.
     """
 
     def __init__(self, sio, sid: str, case_id: int, loop):
@@ -45,18 +40,18 @@ class ProgressEmitter:
 
 
 def get_timestamp() -> str:
+    """Returns the current UTC timestamp formatted as ISO 8601 string."""
     now = datetime.utcnow()
-    return now.strftime("%H:%M")
+    return now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 async def process_chat_message(case_id: int, user_content: str, sio, sid: str) -> None:
     """
     Handles a single chat message from the user:
-
     1. Saves the user message to the DB
-    2. Emits "ai_typing" so the UI shows a loading indicator immediately
-    3. Loads the case data and chat history from the DB
-    4. Runs the LangGraph pipeline in a thread (non-blocking)
+    2. Emits "ai_typing" to show loading indicator
+    3. Loads the case data and history
+    4. Runs LangGraph pipeline in a background thread
     5. Saves the AI response to the DB
     6. Emits "ai_response" back to the client
     """
@@ -73,12 +68,11 @@ async def process_chat_message(case_id: int, user_content: str, sio, sid: str) -
         session.refresh(user_message)
         user_message_id = str(user_message.id)
 
-    # Step 2: Tell the client the AI is working — do this BEFORE the slow call
-    # This is why we must NOT block the event loop below
+    # Step 2: Show typing indicator
     await sio.emit("ai_typing", {"case_id": case_id}, to=sid)
 
     try:
-        # Step 3: Load the case and its conversation history from the DB
+        # Step 3: Load the case and its history from the DB
         with Session(engine) as session:
             case = session.get(Case, case_id)
 
@@ -92,25 +86,25 @@ async def process_chat_message(case_id: int, user_content: str, sio, sid: str) -
                 .order_by(CaseMessage.created_at)
             ).all()
 
-            # Build conversation history, excluding the message we just saved
+            # Build conversation history, excluding current user message
             chat_history = [
                 {"role": msg.role, "content": msg.content}
                 for msg in past_messages
                 if str(msg.id) != user_message_id
             ]
 
-            pdfs_raw = getattr(case, 'pdf_paths_json', '[]') or '[]'
+            pdfs_raw = (getattr(case, 'pdf_paths_json', None) or '').strip() or '[]'
             pdf_paths = json.loads(pdfs_raw)
-            
-            urls_raw = getattr(case, 'urls_json', '[]') or '[]'
+
+            urls_raw = (getattr(case, 'urls_json', None) or '').strip() or '[]'
             urls = json.loads(urls_raw)
-            
-            imgs_raw = getattr(case, 'image_paths_json', '[]') or '[]'
+
+            imgs_raw = (getattr(case, 'image_paths_json', None) or '').strip() or '[]'
             image_paths = json.loads(imgs_raw)
             
             context = case.context
 
-        # Build the initial state for the LangGraph pipeline
+        # Build progress emitter
         loop = asyncio.get_event_loop()
         emitter = ProgressEmitter(sio, sid, case_id, loop)
 
@@ -125,7 +119,6 @@ async def process_chat_message(case_id: int, user_content: str, sio, sid: str) -
             "query_route": "",
             "vault_chunks": [],
             "web_results": "",
-            # Analyst, Researcher, Strategist pipeline — each node fills these in
             "analyst_findings": "",
             "researcher_findings": "",
             "emitter": emitter,
@@ -133,16 +126,9 @@ async def process_chat_message(case_id: int, user_content: str, sio, sid: str) -
             "citation": None,
         }
 
-        # Step 4: Run the 3-node pipeline in a thread executor.
-        #
-        # Flow: analyst_node → researcher_node → strategist_node
-        #
-        # WHY thread executor: LangChain/Ollama HTTP calls are synchronous (blocking).
-        # Running them directly in this async coroutine would freeze the entire
-        # event loop and prevent heartbeats and other socket events from firing.
-        # run_in_executor() offloads the blocking work to a thread pool.
+        # Step 4: Run the LangGraph pipeline in a thread executor
         final_state = await loop.run_in_executor(
-            None,           # Use the default ThreadPoolExecutor
+            None,
             chat_graph.invoke,
             initial_state,
         )
@@ -150,14 +136,21 @@ async def process_chat_message(case_id: int, user_content: str, sio, sid: str) -
         ai_response_text = final_state.get("response", "")
         citation = final_state.get("citation", None)
 
-        # Step 5: Save the AI response to the database
-        citation_json = json.dumps(citation) if citation else None
+        # Check if research trigger is requested
+        if "[TRIGGER_RESEARCH]" in ai_response_text:
+            print(f"[chat_handler] Research trigger requested for case {case_id}")
+            ai_response_text = ai_response_text.replace("[TRIGGER_RESEARCH]", "").strip()
+            try:
+                enqueue_research(case_id)
+            except Exception as e:
+                print(f"[chat_handler] Error enqueuing research: {e}")
 
+        # Step 5: Save AI response to DB
         ai_message = CaseMessage(
             case_id=case_id,
             role="ai",
             content=ai_response_text,
-            citation_json=citation_json,
+            citation=json.dumps(citation) if citation else None,
         )
         with Session(engine) as session:
             session.add(ai_message)
@@ -165,7 +158,7 @@ async def process_chat_message(case_id: int, user_content: str, sio, sid: str) -
             session.refresh(ai_message)
             ai_message_id = str(ai_message.id)
 
-        # Step 6: Send the response back to the client in real time
+        # Step 6: Emit AI response back to the client
         await sio.emit(
             "ai_response",
             {
@@ -183,11 +176,10 @@ async def process_chat_message(case_id: int, user_content: str, sio, sid: str) -
 
     except Exception as error:
         print(f"[chat_handler] Error processing message for case {case_id}: {str(error)}")
-
         # Stop the typing indicator
         await sio.emit("ai_typing_done", {"case_id": case_id}, to=sid)
 
-        # Send a fallback error message so the UI doesn't hang
+        # Emit fallback error message
         await sio.emit(
             "ai_response",
             {
@@ -196,8 +188,7 @@ async def process_chat_message(case_id: int, user_content: str, sio, sid: str) -
                     "id": "error",
                     "role": "ai",
                     "content": (
-                        "I encountered an error while processing your request. "
-                        "Please make sure Ollama is running with granite3.2-vision:latest pulled.\n\n"
+                        "I encountered an error while processing your request.\n\n"
                         f"Detail: {str(error)}"
                     ),
                     "timestamp": get_timestamp(),

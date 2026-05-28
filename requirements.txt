@@ -29,3 +29,7 @@ crewai-tools
 python-jose[cryptography]
 psycopg2-binary
 rq-dashboard
+cloudinary
+mistralai
+langchain-mistralai
+mistralai[realtime]

@@ -35,6 +35,7 @@ def get_alerts():
             "case_name": case_names.get(a.case_id, "Unknown Case") if a.case_id else None,
             "title": a.title,
             "summary": a.summary,
+            "ai_reasoning": a.ai_reasoning,
             "severity": a.severity,
             "status": a.status,
             "created_at": a.created_at.isoformat(),

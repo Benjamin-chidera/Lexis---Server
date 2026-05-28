@@ -313,7 +313,7 @@ def deactivate_user(
     session.add(user)
     session.commit()
     return {"message": f"User {user.corporate_email} has been deactivated."}
-
+ 
 
 @router.patch("/api/admin/users/{user_id}/activate")
 def activate_user(
@@ -323,7 +323,7 @@ def activate_user(
 ):
     user = session.get(User, user_id)
     if not user:
-        raise HTTPException(status_code=404, detail="User not found.")
+        raise HTTPException(status_code=404, detail="User not found.") 
 
     user.is_active = True
     session.add(user)

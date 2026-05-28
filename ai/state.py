@@ -69,3 +69,4 @@ class CaseState(TypedDict):
     # ProgressEmitter instance for real-time stage WebSocket events.
     # Typed as Any to avoid circular imports with chat_handler.
     emitter: Any
+

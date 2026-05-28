@@ -1,6 +1,7 @@
 import os
 from dotenv import load_dotenv
 from sqlmodel import create_engine, SQLModel, Session
+from sqlalchemy import text as sqlalchemy_text
 from typing import Generator
 
 # Load environment variables
@@ -28,6 +29,17 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 def create_tables():
     # Creates all tables that are defined as SQLModel table=True models
     SQLModel.metadata.create_all(engine)
+
+    # Add ai_reasoning column to existing alert tables that were created before
+    # this field was introduced. PostgreSQL's IF NOT EXISTS makes this safe to
+    # run on every startup — it's a no-op when the column already exists.
+    with engine.connect() as conn:
+        conn.execute(
+            sqlalchemy_text(
+                "ALTER TABLE alert ADD COLUMN IF NOT EXISTS ai_reasoning TEXT"
+            )
+        )
+        conn.commit()
 
 
 def get_session() -> Generator[Session, None, None]:

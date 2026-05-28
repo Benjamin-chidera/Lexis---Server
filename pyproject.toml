@@ -32,4 +32,8 @@ dependencies = [
     "rq>=2.8.0",
     "redis>=7.4.0",
     "rq-dashboard>=0.8.6",
+    "boto3>=1.43.10",
+    "cloudinary>=1.44.2",
+    "mistralai[realtime]>=2.4.7",
+    "langchain-mistralai>=1.1.4",
 ]

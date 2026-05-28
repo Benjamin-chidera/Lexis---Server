@@ -25,3 +25,5 @@ def enqueue_research(case_id: int) -> None:
     # Without this, RQ's default 180s timeout fires mid-LLM-call → SIGABRT.
     queue.enqueue("worker.research_job", case_id, job_timeout=1800)
     print(f"[background] Enqueued research job for case {case_id}")
+
+ 

@@ -28,12 +28,18 @@ def describe_image(image_path: str) -> str:
 
     Returns an error string if the file is missing or the model call fails.
     """
-    if not os.path.exists(image_path):
+    if image_path.startswith("http"):
+        try:
+            response = requests.get(image_path, timeout=30)
+            response.raise_for_status()
+            image_bytes = response.content
+        except Exception as error:
+            return f"[Error downloading image: {str(error)}]"
+    elif not os.path.exists(image_path):
         return f"[Image file not found: {image_path}]"
-
-    # Read the image bytes and encode as base64
-    with open(image_path, "rb") as image_file:
-        image_bytes = image_file.read()
+    else:
+        with open(image_path, "rb") as image_file:
+            image_bytes = image_file.read()
 
     image_base64 = base64.b64encode(image_bytes).decode("utf-8")
 

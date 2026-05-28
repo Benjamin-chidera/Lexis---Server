@@ -24,12 +24,12 @@ from .state import CaseState
 from .vector_store import search_vector_store
 from .analyst import run_analyst
 from .researcher import run_researcher
-from .chat_llm import run_chat_direct
+from .chat_llm import run_chat_direct  
 
 
 def analyst_node(state: CaseState) -> dict:
     """
-    Node 1a (runs in parallel with researcher_node).
+    Node 1a (runs in parallel with researcher_node). 
 
     Discovery Compliance Auditor:
     Searches the vault for the most relevant document chunks,
@@ -39,6 +39,9 @@ def analyst_node(state: CaseState) -> dict:
     case_id = state.get("case_id")
     user_query = state.get("current_query", "")
     emitter = state.get("emitter")
+    pdf_paths = state.get("pdf_paths", [])
+    urls = state.get("urls", [])
+    image_paths = state.get("image_paths", []) 
 
     # Emit progress to the client so the UI shows the AI is working
     if emitter:
@@ -48,6 +51,28 @@ def analyst_node(state: CaseState) -> dict:
 
     # Pull the most relevant chunks from the vector store
     chunks = search_vector_store(case_id, user_query, top_k=5)
+
+    # If the vector store is empty but the case has files (uploaded from the home page
+    # to Cloudinary), ingest them on-demand so they are immediately searchable without
+    # requiring a separate vault upload.
+    if not chunks and (pdf_paths or urls or image_paths):
+        print(f"[graph] analyst_node: Vector store empty — ingesting case files on-demand for case {case_id}")
+        from .vector_store import (
+            ingest_pdf_into_vector_store,
+            ingest_url_into_vector_store,
+            ingest_image_into_vector_store,
+        )
+
+        for pdf_path in pdf_paths:
+            ingest_pdf_into_vector_store(case_id, pdf_path)
+
+        for url in urls:
+            ingest_url_into_vector_store(case_id, url)
+
+        for img_path in image_paths:
+            ingest_image_into_vector_store(case_id, img_path)
+
+        chunks = search_vector_store(case_id, user_query, top_k=5)
 
     if not chunks:
         print(f"[graph] analyst_node: No vault documents found for case {case_id}")
@@ -100,6 +125,7 @@ def strategist_node(state: CaseState) -> dict:
     Synthesizes them into an IRAC-structured response with 3 Next Moves.
     Will not add any fact that was not provided by the upstream nodes.
     """
+    case_id = state.get("case_id")
     context = state.get("context", "")
     user_query = state.get("current_query", "")
     vault_chunks = state.get("vault_chunks", [])
@@ -129,13 +155,24 @@ def strategist_node(state: CaseState) -> dict:
         chat_history=chat_history,
         analyst_findings=analyst_findings,
         researcher_findings=researcher_findings,
+        case_id=case_id,
     )
 
-    # Build citation from first vault chunk if available
+    # Build citation from first vault chunk, or fall back to web research
     citation = None
     if vault_chunks:
         first_line = vault_chunks[0].split("\n")[0]
-        citation = {"source": first_line.strip("[]")}
+        raw_source = first_line.strip("[]")
+        filename = raw_source.replace("Source:", "").replace("source:", "").strip()
+        citation = {
+            "filename": filename if filename else "Case Vault",
+            "exhibit": "Case Vault Document",
+        }
+    elif researcher_findings and "No web precedents" not in researcher_findings:
+        citation = {
+            "filename": "Web Research",
+            "exhibit": "External Sources",
+        }
 
     print("[graph] strategist_node: Complete")
 

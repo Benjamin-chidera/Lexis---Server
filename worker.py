@@ -65,44 +65,67 @@ def research_job(case_id: int) -> None:
         return
 
     try:
-        research_result = run_research_crew(context)
-
+        research_result, ai_reasoning = run_research_crew(context)
         severity = "strategic" if len(research_result) > 400 else "routine"
+        title = f"Research Ready: Case #{case_id}"
+        summary = research_result
+        status = "complete"
 
-        new_alert = Alert(
-            case_id=case_id,
-            title=f"Research Ready: Case #{case_id}",
-            summary=research_result[:600],
-            severity=severity,
-            status="unread",
-        )
+    except Exception as error:
+        print(f"[worker] Research failed for case {case_id}: {error}")
+        title = f"Research Error: Case #{case_id}"
+        summary = f"Background research encountered an error and could not complete.\n\n**Error:** {str(error)}"
+        ai_reasoning = ""
+        severity = "routine"
+        status = "failed"
 
-        with Session(engine) as session:
-            case = session.get(Case, case_id)
-            case.status = "complete"
-            session.add(case)
+    # Always update the case status
+    with Session(engine) as session:
+        case = session.get(Case, case_id)
+        case.status = status
+        session.add(case)
+        session.commit()
 
+        case_name = (case.context[:40] + "...") if case.context and len(case.context) > 40 else (case.context or f"Case #{case_id}")
+
+        if status == "failed":
+            # Do NOT create an alert for errors, just send an error event
+            error_data = {
+                "type": "research_error",
+                "case_name": case_name,
+                "message": summary
+            }
+            redis_conn.publish(PUBSUB_CHANNEL, json.dumps(error_data))
+            print(f"[worker] Research job finished for case {case_id} (status={status})")
+        else:
+            new_alert = Alert(
+                case_id=case_id,
+                title=title,
+                summary=summary,
+                ai_reasoning=ai_reasoning or None,
+                severity=severity,
+                status="unread",
+            )
             session.add(new_alert)
             session.commit()
             session.refresh(new_alert)
 
             alert_data = {
+                "type": "new_alert",
                 "id": new_alert.id,
                 "case_id": new_alert.case_id,
+                "case_name": case_name,
                 "title": new_alert.title,
                 "summary": new_alert.summary,
+                "ai_reasoning": new_alert.ai_reasoning,
                 "severity": new_alert.severity,
                 "status": new_alert.status,
                 "created_at": new_alert.created_at.isoformat(),
             }
 
-        # Notify the FastAPI server so it can push a socket event
-        redis_conn.publish(PUBSUB_CHANNEL, json.dumps(alert_data))
-        print(f"[worker] Research complete for case {case_id}")
-
-    except Exception as error:
-        print(f"[worker] Research failed for case {case_id}: {error}")
-        _set_status(case_id, "failed")
+            # Notify the FastAPI server so it can push a socket event
+            redis_conn.publish(PUBSUB_CHANNEL, json.dumps(alert_data))
+            print(f"[worker] Research job finished for case {case_id} (status={status})")
 
 
 def _set_status(case_id: int, status: str) -> None:

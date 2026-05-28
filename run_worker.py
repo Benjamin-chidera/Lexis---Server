@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import redis
-from rq import Queue
+from rq import Queue 
 from rq.worker import SimpleWorker
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
@@ -31,3 +31,6 @@ worker.work(with_scheduler=False)
 
 
 # OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES rq worker --url redis://localhost:6379 legal
+
+# rq-dashboard --redis-url redis://localhost:6379
+ 

@@ -7,21 +7,35 @@ from langchain_community.document_loaders import PyPDFLoader
 
 def extract_text_from_pdf(pdf_path: str) -> str:
     """
-    Reads a PDF from disk and returns all its text, page by page,
-    using LangChain's PyPDFLoader.
+    Extracts text from a PDF given either a Cloudinary URL or a local file path.
     """
-    if not os.path.exists(pdf_path):
-        return f"[PDF file not found: {pdf_path}]"
-
     try:
-        loader = PyPDFLoader(pdf_path)
-        documents = loader.load()
-        
-        pages_text = []
-        for doc in documents:
-            page_number = doc.metadata.get('page', 0) + 1
-            if doc.page_content.strip():
-                pages_text.append(f"--- Page {page_number} ---\n{doc.page_content.strip()}")
+        if pdf_path.startswith("http"):
+            import requests as _requests
+            from pypdf import PdfReader
+            from io import BytesIO
+
+            response = _requests.get(pdf_path, timeout=30)
+            response.raise_for_status()
+            reader = PdfReader(BytesIO(response.content))
+
+            pages_text = []
+            for i, page in enumerate(reader.pages):
+                text = page.extract_text()
+                if text and text.strip():
+                    pages_text.append(f"--- Page {i + 1} ---\n{text.strip()}")
+        else:
+            if not os.path.exists(pdf_path):
+                return f"[PDF file not found: {pdf_path}]"
+
+            loader = PyPDFLoader(pdf_path)
+            documents = loader.load()
+
+            pages_text = []
+            for doc in documents:
+                page_number = doc.metadata.get('page', 0) + 1
+                if doc.page_content.strip():
+                    pages_text.append(f"--- Page {page_number} ---\n{doc.page_content.strip()}")
 
         if not pages_text:
             return "[No readable text found in this PDF]"

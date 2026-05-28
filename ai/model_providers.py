@@ -10,6 +10,7 @@ providers (OpenAI, Anthropic, etc.) in the future by updating this one file.
 
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings  
+from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
 import os
 from dotenv import load_dotenv
 
@@ -21,12 +22,15 @@ load_dotenv()
 # Must be pulled in Ollama: ollama pull granite3.2-vision:latest
 # CHAT_MODEL_NAME = "granite3.2-vision:latest"
 
-MODEL = "gpt-4-turbo"
+# MODEL = "gpt-4-turbo"
 # MODEL = "granite3.2-vision:latest"
+# MODEL = "mistral-large-latest"
+MODEL = "mistral-small-latest"
 
 # 2. Embedding Model (Used for Vector Store)
 # Must be pulled in Ollama: ollama pull nomic-embed-text
-EMBEDDING_MODEL_NAME = "text-embedding-3-larger"
+# EMBEDDING_MODEL_NAME = "text-embedding-3-large"
+EMBEDDING_MODEL_NAME = "mistral-embed"
 # EMBEDDING_MODEL_NAME = "nomic-embed-text"
 
 # 3. Vision Model (Used for Image Handling)
@@ -41,11 +45,21 @@ def get_chat_model(temperature=0):
     Returns a configured LangChain Chat model instance.
     Standardized across the whole project.
     """
-    return ChatOpenAI(
+    return ChatMistralAI(
         model=MODEL,
-        api_key=os.getenv("OPENAI_API_KEY"), 
+        api_key=os.getenv("MISTRAL_API_KEY"), 
         temperature=temperature,
     )
+# def get_chat_model(temperature=0):
+#     """
+#     Returns a configured LangChain Chat model instance.
+#     Standardized across the whole project.
+#     """
+#     return ChatOpenAI(
+#         model=MODEL,
+#         api_key=os.getenv("OPENAI_API_KEY"), 
+#         temperature=temperature,
+#     )
 # def get_chat_model(temperature=0):
 #     """
 #     Returns a configured LangChain Chat model instance.
@@ -63,10 +77,19 @@ def get_embeddings():
     Returns a configured LangChain Embeddings instance.
     Used by the Chroma vector store.
     """
-    return OpenAIEmbeddings(
+    return MistralAIEmbeddings(
         model=EMBEDDING_MODEL_NAME,
-        api_key=os.getenv("OPENAI_API_KEY"), 
+        api_key=os.getenv("MISTRAL_API_KEY"), 
     )
+# def get_embeddings():
+#     """
+#     Returns a configured LangChain Embeddings instance.
+#     Used by the Chroma vector store.
+#     """
+#     return OpenAIEmbeddings(
+#         model=EMBEDDING_MODEL_NAME,
+#         api_key=os.getenv("OPENAI_API_KEY"), 
+#     )
 # def get_embeddings():
 #     """
 #     Returns a configured LangChain Embeddings instance.
@@ -81,14 +104,11 @@ def get_embeddings():
 def get_crew_llm(timeout=1200):
     """
     Returns a configured CrewAI LLM instance.
-    LiteLLM requires the 'ollama/' prefix for local models.
+    LiteLLM requires the provider prefix (e.g. 'mistral/') in the model name.
     """
     from crewai import LLM
     return LLM(
-        # model=f"ollama/{MODEL}",
-        model=MODEL,
-        # base_url=OLLAMA_BASE_URL,
-        api_key=os.getenv("OPENAI_API_KEY"), # Dummy key for local Ollama
-        # api_key="ollama", # Dummy key for local Ollama
+        model=f"mistral/{MODEL}",
+        api_key=os.getenv("MISTRAL_API_KEY"),
         timeout=timeout
     )

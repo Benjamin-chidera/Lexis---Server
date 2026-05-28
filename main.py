@@ -1,3 +1,10 @@
+"""
+main.py
+
+Main ASGI server application combining FastAPI (HTTP REST endpoints) and Socket.IO (Real-time duplex communication).
+Includes full support for Case Intelligence Chat and Real-time Voice Call pipelines.
+"""
+
 import json
 import os
 import asyncio
@@ -18,12 +25,13 @@ from auth import active_tokens, COOKIE_NAME, SECRET_KEY, ALGORITHM
 from ai.background import enqueue_research
 from ai.chat_handler import process_chat_message
 from ai.vector_store import ingest_pdf_into_vector_store, ingest_url_into_vector_store
+from ai.call_handler import CallSession, active_call_sessions
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 PUBSUB_CHANNEL = "research_done"
 
 
-# --- Socket.io setup ---
+# --- Socket.IO setup ---
 
 sio = socketio.AsyncServer(
     async_mode="asgi",
@@ -34,22 +42,21 @@ sio = socketio.AsyncServer(
         "http://127.0.0.1:5173",
         "http://127.0.0.1:5174",
         "http://127.0.0.1:3000",
-        # Production — no trailing slash; browsers send origin without it
+        # Production origin (no trailing slash)
         "https://lexis-pi.vercel.app",
     ],
 )
 
-# Maps socket sid → user_id for the duration of a connection
+# Maps socket sid -> user_id for the duration of the connection
 socket_sessions: dict[str, int] = {}
 
 
-# --- FastAPI setup ---
+# --- FastAPI setup & Redis PubSub Relayer ---
 
 async def _redis_pubsub_listener(sio_instance):
     """
-    Subscribes to the Redis "research_done" channel.
-    When the RQ worker publishes a completed alert, this relays
-    the event to all connected socket.io clients.
+    Subscribes to the Redis 'research_done' channel.
+    Relays research alerts to connected socket clients.
     """
     r = aioredis.from_url(REDIS_URL)
     pubsub = r.pubsub()
@@ -60,74 +67,73 @@ async def _redis_pubsub_listener(sio_instance):
         if message["type"] != "message":
             continue
         try:
-            alert_data = json.loads(message["data"])
-            await sio_instance.emit("new_alert", {"alert": alert_data})
-            print(f"[pubsub] Forwarded alert for case {alert_data.get('case_id')}")
+            payload = json.loads(message["data"])
+            if payload.get("type") == "research_error":
+                await sio_instance.emit("research_error", payload)
+                print(f"[pubsub] Forwarded error for case {payload.get('case_name')}")
+            else:
+                await sio_instance.emit("new_alert", {"alert": payload})
+                print(f"[pubsub] Forwarded alert for case {payload.get('case_id')}")
         except Exception as error:
             print(f"[pubsub] Failed to relay message: {error}")
 
 
-def _reenqueue_stuck_cases():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     """
-    On server startup, check Postgres for cases that were left in "pending"
-    or "processing" state (e.g. worker crashed or laptop was closed).
-    Re-enqueue only those not already sitting in the Redis queue, so we
-    never create duplicate jobs for the same case.
+    Handles server startup and shutdown lifecycles.
+    - Creates DB tables
+    - Spawns Redis PubSub listener task
+    - Re-enqueues pending/processing research jobs that crashed
     """
+    # Create DB tables if they don't exist
+    create_tables()
+
+    # Start the pubsub listener in the background
+    pubsub_task = asyncio.create_task(_redis_pubsub_listener(sio))
+
+    # Re-enqueue crashed or unfinished background research jobs
     import redis as redis_sync
     from rq import Queue as RQQueue
     from rq.job import Job
 
-    conn = redis_sync.Redis.from_url(REDIS_URL)
-    q = RQQueue("legal", connection=conn)
+    try:
+        conn = redis_sync.Redis.from_url(REDIS_URL)
+        q = RQQueue("legal", connection=conn)
 
-    # Collect case_ids that already have a queued job
-    already_queued: set[int] = set()
-    for job_id in q.job_ids:
-        try:
-            job = Job.fetch(job_id, connection=conn)
-            if job.args:
-                already_queued.add(job.args[0])
-        except Exception:
-            pass
+        # Gather case IDs that are already queued
+        already_queued: set[int] = set()
+        for job_id in q.job_ids:
+            try:
+                job = Job.fetch(job_id, connection=conn)
+                if job and job.args:
+                    already_queued.add(int(job.args[0]))
+            except Exception:
+                continue
 
-    with Session(engine) as session:
-        stuck = session.exec(
-            select(Case).where(Case.status.in_(["pending", "processing"]))
-        ).all()
-
-    for case in stuck:
-        if case.id in already_queued:
-            print(f"[startup] Case {case.id} already in queue — skipping")
-        else:
-            print(f"[startup] Re-enqueuing stuck case {case.id} (was '{case.status}')")
-            enqueue_research(case.id)
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    create_tables()
-    os.makedirs("uploads", exist_ok=True)
-
-    # Re-enqueue any research jobs that were interrupted before shutdown
-    _reenqueue_stuck_cases()
-
-    # Start the pub/sub relay in a background task (runs for the app lifetime)
-    listener_task = asyncio.create_task(_redis_pubsub_listener(sio))
+        # Scan Postgres for pending or processing cases
+        with Session(engine) as session:
+            statement = select(Case).where(Case.status.in_(["pending", "processing"]))
+            crashed_cases = session.exec(statement).all()
+            
+            for case in crashed_cases:
+                if case.id not in already_queued:
+                    print(f"[lifespan] Re-enqueuing crashed case research: {case.id}")
+                    enqueue_research(case.id)
+    except Exception as error:
+        print(f"[lifespan] Startup re-enqueue error: {error}")
 
     yield
 
-    listener_task.cancel()
+    # Clean up background pubsub task
+    pubsub_task.cancel()
     try:
-        await listener_task
+        await pubsub_task
     except asyncio.CancelledError:
         pass
 
 
-fastapi_app = FastAPI(
-    lifespan=lifespan,
-    swagger_ui_parameters={"withCredentials": True},
-)
+fastapi_app = FastAPI(lifespan=lifespan)
 
 fastapi_app.add_middleware(
     CORSMiddleware,
@@ -138,7 +144,6 @@ fastapi_app.add_middleware(
         "http://127.0.0.1:5173",
         "http://127.0.0.1:5174",
         "http://127.0.0.1:3000",
-        # Production — no trailing slash; browsers send origin without it
         "https://lexis-pi.vercel.app",
     ],
     allow_credentials=True,
@@ -146,6 +151,7 @@ fastapi_app.add_middleware(
     allow_headers=["*"],
 )
 
+# Register routers
 fastapi_app.include_router(auth_router.router)
 fastapi_app.include_router(upload.router)
 fastapi_app.include_router(cases.router)
@@ -153,15 +159,20 @@ fastapi_app.include_router(files.router)
 fastapi_app.include_router(alerts.router)
 fastapi_app.include_router(messages.router)
 
+
 @fastapi_app.get("/")
 def root():
     return {"message": "Legal Assistant Server is running"}
 
-# --- Socket.io event handlers ---
+
+# --- Socket.IO event handlers ---
 
 @sio.event
 async def connect(sid, environ, auth):
-    # Read the HttpOnly access_token cookie from the socket handshake
+    """
+    Authenticates Socket.IO connections.
+    Reads access token cookie from HTTP handshake headers.
+    """
     cookie_header = environ.get("HTTP_COOKIE", "")
     cookie = SimpleCookie()
     cookie.load(cookie_header)
@@ -172,21 +183,21 @@ async def connect(sid, environ, auth):
         print(f"[socket] Rejected — no token: {sid}")
         return False
 
-    # Fast path: token is already in the in-memory session store
+    # Check memory cache first
     if token in active_tokens:
         socket_sessions[sid] = active_tokens[token]
         print(f"[socket] Client connected: {sid}, user_id: {active_tokens[token]}")
-        return
+        return True
 
-    # Slow path: server may have restarted and lost active_tokens.
-    # Decode the JWT directly so valid sessions survive restarts.
+    # Decode and restore JWT directly
     try:
-        from jose import jwt as jose_jwt, JWTError
+        from jose import jwt as jose_jwt
         payload = jose_jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id = int(payload["sub"])
-        active_tokens[token] = user_id   # restore so HTTP routes also work
+        active_tokens[token] = user_id
         socket_sessions[sid] = user_id
-        print(f"[socket] Client reconnected after restart: {sid}, user_id: {user_id}")
+        print(f"[socket] Client reconnected: {sid}, user_id: {user_id}")
+        return True
     except Exception:
         print(f"[socket] Rejected invalid/expired token: {sid}")
         return False
@@ -194,15 +205,22 @@ async def connect(sid, environ, auth):
 
 @sio.event
 async def disconnect(sid):
+    """Cleans up session records when socket disconnects."""
     user_id = socket_sessions.pop(sid, None)
+    
+    # End and clean up any voice call sessions
+    session = active_call_sessions.pop(sid, None)
+    if session:
+        await session.stop()
+
     print(f"[socket] Client disconnected: {sid}, user_id: {user_id}")
 
 
 @sio.event
 async def start_case(sid, data):
     """
-    Fired by the client when the user clicks 'Start Case Strategy'.
-    Saves the case to the DB and kicks off background research.
+    Fired when a user starts analyzing a new case.
+    Ingests files and enqueues research worker jobs.
     """
     context = data.get("context", "")
     urls = data.get("urls", [])
@@ -225,12 +243,12 @@ async def start_case(sid, data):
         session.refresh(new_case)
         case_id = new_case.id
 
-    print(f"[socket] Case {case_id} created by {sid} (user_id={user_id})")
-
-    await sio.emit("case_created", {"case_id": case_id}, to=sid)
-
-    # Ingest all PDFs, URLs, and Images into the vector store so they are searchable.
-    from ai.vector_store import ingest_pdf_into_vector_store, ingest_url_into_vector_store, ingest_image_into_vector_store
+    # Ingest PDFs, URLs, and images in a background thread executor
+    from ai.vector_store import (
+        ingest_pdf_into_vector_store,
+        ingest_url_into_vector_store,
+        ingest_image_into_vector_store
+    )
     loop = asyncio.get_event_loop()
 
     for pdf_path in pdf_paths:
@@ -257,21 +275,13 @@ async def start_case(sid, data):
             img_path,
         )
 
-    # Enqueue background research — persists across server/worker restarts
+    # Enqueue background research job
     enqueue_research(case_id)
 
 
 @sio.event
 async def chat_message(sid, data):
-    """
-    Fired when the user sends a message in the case intelligence stream.
-
-    Expected data:
-    {
-        "case_id": 1,
-        "content": "What are the key obligations in the contract?"
-    }
-    """
+    """Fired when user sends a chat message in the Intelligence Stream."""
     case_id = data.get("case_id")
     content = data.get("content", "").strip()
 
@@ -279,10 +289,74 @@ async def chat_message(sid, data):
         return
 
     print(f"[socket] chat_message for case {case_id} from {sid}: {content[:60]}")
-
     asyncio.create_task(process_chat_message(case_id, content, sio, sid))
 
 
-# --- Combine FastAPI + Socket.io into one ASGI app ---
+# --- Voice Call event handlers ---
 
+@sio.event
+async def start_call_session(sid, data):
+    """Fired when user clicks 'Call Assistant'."""
+    case_id = data.get("case_id")
+    user_id = socket_sessions.get(sid)
+
+    if not case_id:
+        await sio.emit("call_error", {
+            "message": "No case_id provided.",
+        }, to=sid)
+        return
+
+    # Clean up any active sessions for this client first
+    if sid in active_call_sessions:
+        old_session = active_call_sessions[sid]
+        await old_session.stop()
+        del active_call_sessions[sid]
+
+    session = CallSession(sio, sid, int(case_id))
+    active_call_sessions[sid] = session
+    await session.start()
+
+    print(f"[socket] Call session started for case {case_id} by {sid} (user_id={user_id})")
+    await sio.emit("call_session_started", {
+        "case_id": case_id,
+    }, to=sid)
+
+
+@sio.event
+async def audio_chunk(sid, data):
+    """Receives binary PCM16 audio chunks from browser microphone."""
+    session = active_call_sessions.get(sid)
+    if not session:
+        return
+
+    if isinstance(data, (bytes, bytearray)):
+        await session.handle_audio_chunk(bytes(data))
+
+
+@sio.event
+async def call_user_speaking(sid):
+    """Browser signals the user has started speaking (interruption event)."""
+    session = active_call_sessions.get(sid)
+    if session:
+        await session.handle_interruption()
+
+
+@sio.event
+async def call_ai_speaking_done(sid):
+    """Browser signals that the AI response audio has completed playback."""
+    session = active_call_sessions.get(sid)
+    if session:
+        session.mark_ai_done_speaking()
+
+
+@sio.event
+async def end_call_session(sid):
+    """Cleans up the call session when requested."""
+    session = active_call_sessions.pop(sid, None)
+    if session:
+        await session.stop()
+        print(f"[socket] Call session ended for case {session.case_id} by {sid}")
+
+
+# --- Wrap combined app ---
 app = socketio.ASGIApp(sio, fastapi_app)

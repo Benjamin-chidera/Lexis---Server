@@ -74,6 +74,9 @@ class Alert(SQLModel, table=True):
     # A short paragraph summary of what was found
     summary: str
 
+    # Why the AI flagged this as relevant and how it can help win the case
+    ai_reasoning: Optional[str] = Field(default=None)
+
     # urgent | strategic | routine
     severity: str = Field(default="routine")
 

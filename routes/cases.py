@@ -165,7 +165,8 @@ class AddURLRequest(BaseModel):
 @router.post("/api/cases/{case_id}/add-url")
 def add_url_to_case(case_id: int, req: AddURLRequest, background_tasks: BackgroundTasks):
     """
-    Adds a new URL to an existing case and triggers background ingestion.
+    Adds a new URL to an existing case, triggers background ingestion,
+    and re-queues background research so the agent uses the new content.
     """
     with Session(engine) as session:
         case = session.get(Case, case_id)
@@ -176,9 +177,40 @@ def add_url_to_case(case_id: int, req: AddURLRequest, background_tasks: Backgrou
         urls = json.loads(urls_raw)
         urls.append(req.url)
         case.urls_json = json.dumps(urls)
+        case.status = "pending"
         session.add(case)
         session.commit()
 
     background_tasks.add_task(ingest_url_into_vector_store, case_id, req.url)
 
+    from ai.background import enqueue_research
+    enqueue_research(case_id)
+
     return {"message": f"URL added and ingestion started for case {case_id}", "url": req.url}
+
+
+class AddContextRequest(BaseModel):
+    context: str
+
+@router.post("/api/cases/{case_id}/add-context")
+def add_context_to_case(case_id: int, req: AddContextRequest):
+    """
+    Appends additional context notes to an existing case and re-queues
+    background research so the agent uses the updated context.
+    """
+    with Session(engine) as session:
+        case = session.get(Case, case_id)
+        if not case:
+            raise HTTPException(status_code=404, detail=f"Case {case_id} not found")
+
+        existing = case.context or ""
+        separator = "\n\n" if existing.strip() else ""
+        case.context = existing + separator + req.context.strip()
+        case.status = "pending"
+        session.add(case)
+        session.commit()
+
+    from ai.background import enqueue_research
+    enqueue_research(case_id)
+
+    return {"message": f"Context updated and research re-queued for case {case_id}"}

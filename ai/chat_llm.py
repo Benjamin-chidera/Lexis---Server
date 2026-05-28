@@ -1,7 +1,7 @@
 """
 chat_llm.py
 
-Node 3 (Strategist) of the Analyst → Researcher → Strategist pipeline.
+Node 3 (Strategist) of the Analyst -> Researcher -> Strategist pipeline.
 
 The Strategist is the Senior Strategic Partner.
 It synthesizes ONLY what the Analyst found (document vulnerabilities) and
@@ -21,10 +21,11 @@ IRAC Output Format:
     - Next Moves (3 actionable legal steps)
 """
 
+import json
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from .model_providers import get_chat_model 
 
-STRATEGIST_SYSTEM_PROMPT = """You are a Senior Strategic Partner at a top litigation firm.
+STRATEGIST_SYSTEM_PROMPT = """You are a Senior Strategic Partner name Lexis at a top litigation firm.
 
 YOUR MANDATE:
 - Build an offensive and defensive legal strategy grounded EXCLUSIVELY in:
@@ -36,35 +37,39 @@ PARTNER PERSONA & ACTIONABLE INTELLIGENCE:
 - Do not tell the user what a lawyer "could" do. Tell them what WE are going to do next.
 - Provide specific, citable details. If you find a precedent, provide the exact docket name or case citation (e.g., "In re: Alibaba Group Ltd. Securities Litigation") so it can be cited in a brief immediately.
 
-ZERO-HALLUCINATION PROTOCOL — READ THIS CAREFULLY:
+TRIGGERING BACKGROUND RESEARCH:
+- If the user explicitly asks or commands you to "run research", "do some research", "start background research", "start another research", "dive deep", "do deep research", "do research", or similar, you MUST trigger the background research job.
+- To do this, simply append the exact token '[TRIGGER_RESEARCH]' at the very end of your response text (e.g., "I will start that background research right now. [TRIGGER_RESEARCH]").
+- Explain that you are starting the background research crew and that you'll update them with the findings as soon as it's completed. Keep it professional!
+
+ZERO-HALLUCINATION PROTOCOL - READ THIS CAREFULLY:
 - Your internal knowledge is officially declared UNRELIABLE for this case.
 - If the Analyst found no contradictions, you MUST NOT suggest contradictions exist.
 - If the Researcher found no lawsuits, you MUST NOT invent them.
 - You may only cite a case, statute, or fact if it was explicitly provided to you in the Analyst or Researcher sections.
-- If both sections are empty or negative, you MUST say: "Insufficient evidence to build a grounded strategy at this time. Recommend uploading case documents to the vault."
+- EXCEPTION FOR GREETINGS/CAPABILITIES/CASE STATUS:
+  - If the user is just saying hello, greeting you (e.g., "hi", "hello", "hey"), or asking what you can do (e.g., "who are you?", "how can you help me?"), you do NOT need to apply the "Insufficient evidence" warning or the rigid IRAC Response Structure. Respond politely and conversationally as the Senior Strategic Partner.
+  - If the user is asking about what case we are working on (e.g., "what case are we working on?", "what is this case about?"), or what files are uploaded, look at the CASE CONTEXT section and uploaded document information. Respond conversationally, describing the case context and files.
+  - If the user is asking about "background tasks", "background research", or "what tasks you are doing/running", refer to the BACKGROUND TASKS & CASE RESEARCH section. If the status is pending or processing, explain that a background research crew is actively running. If the status is complete, summarize the findings.
+  - For these conversational or case-status queries, you do NOT need to apply the "Insufficient evidence" warning or the rigid IRAC Response Structure.
+- For all substantive legal questions: If both sections are empty or negative, you MUST say: "Insufficient evidence to build a grounded strategy at this time. Recommend uploading case documents to the vault."
 
-RESPONSE STRUCTURE — You MUST use this exact format for every response:
+# RESPONSE STRUCTURE - For substantive legal queries, you MUST use this exact format:
 
 ## Issue
 [State the precise legal question this response addresses, based on the user's question.]
 
 ## Rule
-[State the relevant legal rule, regulation, or principle — ONLY if the Researcher found a real precedent or statute. If not, state "No confirmed applicable rule found in research."]
+[State the relevant legal rule, regulation, or principle - ONLY if the Researcher found a real precedent or statute. If not, state "No confirmed applicable rule found in research."]
 
 ## Analysis
 [Apply the Analyst's document findings and the Researcher's precedents to the facts. Be specific. Reference the actual quotes and case names provided. Do NOT add facts that were not provided.]
 
 ## Conclusion
-[A direct, confident answer to the user's legal question based only on the evidence above.]
+[Summarize the legal conclusion based on the issue and rules. Provide a clear, definitive statement of our strategic outlook.]
 
-## ⚔️ Next Moves
-Provide exactly 3 concrete, actionable legal steps. Each must reference a specific finding:
-1. [Action] — *Based on: [Analyst quote or Researcher precedent]*
-2. [Action] — *Based on: [Analyst quote or Researcher precedent]*
-3. [Action] — *Based on: [Analyst quote or Researcher precedent]*
-
-If a Next Move cannot be grounded in a real finding, replace it with:
-"[Awaiting evidence] — Upload [specific document type] to the vault to unlock this step."
+## Next Moves
+Provide exactly 3 actionable, direct next legal steps for the litigation team (e.g., file a specific motion, audit a specific contract clause, serve a specific request for admission).
 """
 
 
@@ -75,43 +80,79 @@ def run_chat_direct(
     chat_history: list,
     analyst_findings: str = "",
     researcher_findings: str = "",
+    case_id: int = None,
 ) -> str:
-    """
-    The Strategist node — synthesizes Analyst + Researcher outputs into
-    an IRAC-structured legal strategy.
-
-    Args:
-        context:              The attorney's case context text
-        vault_content:        Formatted vault chunks (kept for fallback reference)
-        user_query:           The user's current question
-        chat_history:         Recent chat messages for conversational context
-        analyst_findings:     Output from analyst.py (direct quotes + contradictions)
-        researcher_findings:  Output from researcher.py (real precedents from web)
-
-    Returns the Strategist's IRAC-formatted response as a plain string.
-    """
-    # temperature=0 = deterministic, factual, no creative elaboration
-    llm = get_chat_model(temperature=0)
+    """Invokes the strategist LLM directly to synthesize a legal response."""
+    llm = get_chat_model(temperature=0.2)
 
     messages = [SystemMessage(content=STRATEGIST_SYSTEM_PROMPT)]
 
-    # Include the last 6 messages for conversational continuity
-    recent_history = chat_history[-6:]
-    for msg in recent_history:
+    # Add chat history
+    for msg in chat_history:
         if msg["role"] == "user":
             messages.append(HumanMessage(content=msg["content"]))
-        else:
+        elif msg["role"] == "ai" or msg["role"] == "assistant":
             messages.append(AIMessage(content=msg["content"]))
 
-    # Build the final message with all evidence sections clearly labelled
-    # The Strategist reads these sections and ONLY these sections
-    evidence_sections = []
+    uploaded_docs_text = ""
+    background_status_text = ""
 
+    if case_id:
+        try:
+            from sqlmodel import Session
+            from database import engine
+            from models import Case
+            
+            with Session(engine) as session:
+                case = session.get(Case, case_id)
+                if case:
+                    # Uploaded documents names
+                    pdfs_raw = getattr(case, 'pdf_paths_json', '[]') or '[]'
+                    pdf_paths = json.loads(pdfs_raw)
+                    pdf_names = [p.split("/")[-1] for p in pdf_paths] if pdf_paths else []
+                    
+                    urls_raw = getattr(case, 'urls_json', '[]') or '[]'
+                    urls = json.loads(urls_raw)
+                    
+                    imgs_raw = getattr(case, 'image_paths_json', '[]') or '[]'
+                    image_paths = json.loads(imgs_raw)
+                    img_names = [i.split("/")[-1] for i in image_paths] if image_paths else []
+
+                    doc_list = []
+                    if pdf_names:
+                        doc_list.append(f"Uploaded PDF Documents: {', '.join(pdf_names)}")
+                    if urls:
+                        doc_list.append(f"Case URLs: {', '.join(urls)}")
+                    if img_names:
+                        doc_list.append(f"Uploaded Images: {', '.join(img_names)}")
+                    
+                    uploaded_docs_text = "\n".join(doc_list) if doc_list else "No documents uploaded."
+                    
+                    # Background research status
+                    status = getattr(case, 'status', 'pending')
+                    latest_research = getattr(case, 'background_research', '') or ''
+                    
+                    background_status_text = (
+                        f"=== BACKGROUND TASKS & CASE RESEARCH ===\n"
+                        f"Status: {status.upper()}\n"
+                        f"Latest background research: {latest_research}\n"
+                        f"If the status is 'processing' or 'pending', the background research task is currently running in the background. Explain this to the user."
+                    )
+                    
+                    # Append uploaded documents text to the case context
+                    context = f"{context}\n\n{uploaded_docs_text}"
+        except Exception as e:
+            print(f"[chat_llm] Error loading background status for case {case_id}: {e}")
+
+    evidence_sections = []
     evidence_sections.append(f"CASE CONTEXT (written by attorney):\n{context}")
+
+    if background_status_text:
+        evidence_sections.append(background_status_text)
 
     if analyst_findings and "No documentary vulnerabilities identified" not in analyst_findings:
         evidence_sections.append(
-            f"=== ANALYST FINDINGS (Document Vulnerabilities — Direct Quotes Only) ===\n{analyst_findings}"
+            f"=== ANALYST FINDINGS (Document Vulnerabilities - Direct Quotes Only) ===\n{analyst_findings}"
         )
     else:
         evidence_sections.append(
