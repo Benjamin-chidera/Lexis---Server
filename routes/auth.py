@@ -26,7 +26,8 @@ _EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
 
 # --- Request schemas ---
 
-class CheckEmailRequest(BaseModel):
+class EmailBase(BaseModel):
+    """Base class so email validation is defined once and reused."""
     corporate_email: str
 
     @field_validator("corporate_email")
@@ -38,31 +39,17 @@ class CheckEmailRequest(BaseModel):
         return v
 
 
-class LoginRequest(BaseModel):
-    corporate_email: str
+class CheckEmailRequest(EmailBase):
+    pass
+
+
+class LoginRequest(EmailBase):
     password: str
 
-    @field_validator("corporate_email")
-    @classmethod
-    def validate_email(cls, v: str) -> str:
-        v = v.strip().lower()
-        if not _EMAIL_RE.match(v):
-            raise ValueError("Invalid email address.")
-        return v
 
-
-class SetPasswordRequest(BaseModel):
-    corporate_email: str
+class SetPasswordRequest(EmailBase):
     password: str
     confirm_password: str
-
-    @field_validator("corporate_email")
-    @classmethod
-    def validate_email(cls, v: str) -> str:
-        v = v.strip().lower()
-        if not _EMAIL_RE.match(v):
-            raise ValueError("Invalid email address.")
-        return v
 
     @field_validator("password")
     @classmethod
@@ -72,18 +59,9 @@ class SetPasswordRequest(BaseModel):
         return v
 
 
-class RegisterUserRequest(BaseModel):
-    corporate_email: str
+class RegisterUserRequest(EmailBase):
     name: str
     role: str = "employee"
-
-    @field_validator("corporate_email")
-    @classmethod
-    def validate_email(cls, v: str) -> str:
-        v = v.strip().lower()
-        if not _EMAIL_RE.match(v):
-            raise ValueError("Invalid email address.")
-        return v
 
     @field_validator("name")
     @classmethod
@@ -101,19 +79,10 @@ class RegisterUserRequest(BaseModel):
         return v
 
 
-class AdminSetupRequest(BaseModel):
-    corporate_email: str
+class AdminSetupRequest(EmailBase):
     name: str
     password: str
     confirm_password: str
-
-    @field_validator("corporate_email")
-    @classmethod
-    def validate_email(cls, v: str) -> str:
-        v = v.strip().lower()
-        if not _EMAIL_RE.match(v):
-            raise ValueError("Invalid email address.")
-        return v
 
     @field_validator("name")
     @classmethod
@@ -131,7 +100,9 @@ class AdminSetupRequest(BaseModel):
         return v
 
 
-def _make_auth_response(user: User) -> JSONResponse:
+# --- Helper ---
+
+def make_auth_response(user: User) -> JSONResponse:
     token = create_token(user.id, user.role)
     response = JSONResponse({
         "user_id": user.id,
@@ -144,10 +115,6 @@ def _make_auth_response(user: User) -> JSONResponse:
         value=token,
         httponly=True,
         secure=IS_PRODUCTION,
-        # SameSite=None is required for cross-origin cookie sending (frontend on Vercel,
-        # backend on a different domain). SameSite=Lax only sends on same-site requests,
-        # so every fetch from the frontend would be cookieless → 401 on every API call.
-        # SameSite=None requires Secure=True, which is already enforced in production.
         samesite="none" if IS_PRODUCTION else "lax",
         max_age=TOKEN_EXPIRE_DAYS * 86400,
     )
@@ -158,10 +125,6 @@ def _make_auth_response(user: User) -> JSONResponse:
 
 @router.post("/api/auth/check-email")
 def check_email(req: CheckEmailRequest, session: Session = Depends(get_session)):
-    """
-    Step 1 of login. Returns whether the user exists and has a password set.
-    Frontend uses this to decide: show login form or new-password form.
-    """
     user = session.exec(
         select(User).where(User.corporate_email == req.corporate_email)
     ).first()
@@ -193,12 +156,11 @@ def login(req: LoginRequest, session: Session = Depends(get_session)):
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Your account has been deactivated. Contact your administrator.")
 
-    return _make_auth_response(user)
+    return make_auth_response(user)
 
 
 @router.post("/api/auth/set-password")
 def set_password(req: SetPasswordRequest, session: Session = Depends(get_session)):
-    """New employees use this to set their password on first login."""
     if req.password != req.confirm_password:
         raise HTTPException(status_code=400, detail="Passwords do not match.")
 
@@ -220,7 +182,7 @@ def set_password(req: SetPasswordRequest, session: Session = Depends(get_session
     session.commit()
     session.refresh(user)
 
-    return _make_auth_response(user)
+    return make_auth_response(user)
 
 
 @router.post("/api/auth/logout")
@@ -256,7 +218,6 @@ def register_user(
     session: Session = Depends(get_session),
     _admin: dict = Depends(require_admin),
 ):
-    """Admin registers a new employee. The employee sets their own password on first login."""
     existing = session.exec(
         select(User).where(User.corporate_email == req.corporate_email)
     ).first()
@@ -318,7 +279,7 @@ def deactivate_user(
     session.add(user)
     session.commit()
     return {"message": f"User {user.corporate_email} has been deactivated."}
- 
+
 
 @router.patch("/api/admin/users/{user_id}/activate")
 def activate_user(
@@ -328,7 +289,7 @@ def activate_user(
 ):
     user = session.get(User, user_id)
     if not user:
-        raise HTTPException(status_code=404, detail="User not found.") 
+        raise HTTPException(status_code=404, detail="User not found.")
 
     user.is_active = True
     session.add(user)
@@ -340,10 +301,6 @@ def activate_user(
 
 @router.post("/api/auth/admin-setup", status_code=201)
 def admin_setup(req: AdminSetupRequest, session: Session = Depends(get_session)):
-    """
-    Creates the very first admin account.
-    Only works when zero admins exist in the database.
-    """
     existing_admin = session.exec(select(User).where(User.role == "admin")).first()
     if existing_admin:
         raise HTTPException(
