@@ -144,7 +144,11 @@ def _make_auth_response(user: User) -> JSONResponse:
         value=token,
         httponly=True,
         secure=IS_PRODUCTION,
-        samesite="lax",
+        # SameSite=None is required for cross-origin cookie sending (frontend on Vercel,
+        # backend on a different domain). SameSite=Lax only sends on same-site requests,
+        # so every fetch from the frontend would be cookieless → 401 on every API call.
+        # SameSite=None requires Secure=True, which is already enforced in production.
+        samesite="none" if IS_PRODUCTION else "lax",
         max_age=TOKEN_EXPIRE_DAYS * 86400,
     )
     return response
