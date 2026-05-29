@@ -6,6 +6,9 @@
 app = 'lexis-server'
 primary_region = 'lhr'
 
+[env]
+  ENVIRONMENT = "production"
+
 [build]
 
 [processes]
