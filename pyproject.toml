@@ -36,4 +36,5 @@ dependencies = [
     "cloudinary>=1.44.2",
     "mistralai[realtime]>=2.4.7",
     "langchain-mistralai>=1.1.4",
+    "langchain-nvidia-ai-endpoints>=1.4.1",
 ]

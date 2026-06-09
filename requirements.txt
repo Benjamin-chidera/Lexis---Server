@@ -33,3 +33,4 @@ cloudinary
 mistralai
 langchain-mistralai
 mistralai[realtime]
+langchain-nvidia-ai-endpoints

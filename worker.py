@@ -21,6 +21,7 @@ Resume logic:
 import os
 import json
 import redis
+import time
 
 from dotenv import load_dotenv
 from sqlmodel import Session
@@ -57,27 +58,40 @@ def research_job(case_id: int) -> None:
         case.status = "processing"
         session.add(case)
         session.commit()
-        context = case.context
+        context = case.context 
 
     if not context.strip():
         print(f"[worker] Case {case_id} has no context — marking complete")
         _set_status(case_id, "complete")
         return
 
-    try:
-        research_result, ai_reasoning = run_research_crew(context)
-        severity = "strategic" if len(research_result) > 400 else "routine"
-        title = f"Research Ready: Case #{case_id}"
-        summary = research_result
-        status = "complete"
+    max_retries = 3
+    retry_delay = 15  # seconds backoff factor
+    final_error = None
 
-    except Exception as error:
-        print(f"[worker] Research failed for case {case_id}: {error}")
-        title = f"Research Error: Case #{case_id}"
-        summary = f"Background research encountered an error and could not complete.\n\n**Error:** {str(error)}"
-        ai_reasoning = ""
-        severity = "routine"
-        status = "failed"
+    for attempt in range(1, max_retries + 1):
+        try:
+            research_result, ai_reasoning = run_research_crew(context)
+            severity = "strategic" if len(research_result) > 400 else "routine"
+            title = f"Research Ready: Case #{case_id}" 
+            summary = research_result
+            status = "complete"
+            final_error = None
+            break  # Success! Break the retry loop
+        except Exception as error:
+            print(f"[worker] Research attempt {attempt}/{max_retries} failed for case {case_id}: {error}")
+            final_error = error
+            if attempt < max_retries:
+                sleep_time = retry_delay * attempt
+                print(f"[worker] Waiting {sleep_time} seconds before retrying...")
+                time.sleep(sleep_time)
+            else:
+                # Final failure
+                title = f"Research Error: Case #{case_id}"
+                summary = f"Background research encountered an error and could not complete after {max_retries} attempts.\n\n**Error:** {str(error)}"
+                ai_reasoning = ""
+                severity = "routine"
+                status = "failed"
 
     # Always update the case status
     with Session(engine) as session:
@@ -97,6 +111,8 @@ def research_job(case_id: int) -> None:
             }
             redis_conn.publish(PUBSUB_CHANNEL, json.dumps(error_data))
             print(f"[worker] Research job finished for case {case_id} (status={status})")
+            if final_error:
+                raise final_error
         else:
             new_alert = Alert(
                 case_id=case_id,

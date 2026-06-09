@@ -57,12 +57,18 @@ def split_text_into_chunks(text: str, source_label: str) -> list:
 
 def ingest_pdf_into_vector_store(case_id: int, pdf_path: str) -> int:
     """
-    Parses text from a local PDF file and adds it to the case's vector store.
+    Parses text from a local PDF file or remote PDF URL and adds it to the case's vector store.
     """
     import pypdf
+    import io
     filename = os.path.basename(pdf_path)
     try:
-        reader = pypdf.PdfReader(pdf_path)
+        if pdf_path.startswith("http://") or pdf_path.startswith("https://"):
+            response = http_requests.get(pdf_path, timeout=30)
+            response.raise_for_status()
+            reader = pypdf.PdfReader(io.BytesIO(response.content))
+        else:
+            reader = pypdf.PdfReader(pdf_path)
         text_parts = []
         for page in reader.pages:
             text_parts.append(page.extract_text() or "")

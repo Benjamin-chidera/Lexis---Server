@@ -30,13 +30,23 @@ def create_tables():
     # Creates all tables that are defined as SQLModel table=True models
     SQLModel.metadata.create_all(engine)
 
-    # Add ai_reasoning column to existing alert tables that were created before
-    # this field was introduced. PostgreSQL's IF NOT EXISTS makes this safe to
-    # run on every startup — it's a no-op when the column already exists.
+    # Add columns to existing alert tables that were created before
+    # these fields were introduced. PostgreSQL's IF NOT EXISTS makes this
+    # safe to run on every startup — it's a no-op when the column already exists.
     with engine.connect() as conn:
         conn.execute(
             sqlalchemy_text(
                 "ALTER TABLE alert ADD COLUMN IF NOT EXISTS ai_reasoning TEXT"
+            )
+        )
+        conn.execute(
+            sqlalchemy_text(
+                "ALTER TABLE alert ADD COLUMN IF NOT EXISTS review_status VARCHAR NOT NULL DEFAULT 'pending'"
+            )
+        )
+        conn.execute(
+            sqlalchemy_text(
+                "ALTER TABLE alert ADD COLUMN IF NOT EXISTS rejection_reason TEXT"
             )
         )
         conn.commit()

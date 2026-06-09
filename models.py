@@ -83,4 +83,11 @@ class Alert(SQLModel, table=True):
     # unread | read | archived
     status: str = Field(default="unread")
 
+    # Whether the attorney accepted or rejected this research result
+    # pending | accepted | rejected
+    review_status: str = Field(default="pending")
+
+    # When review_status is "rejected", stores the attorney's explanation
+    rejection_reason: Optional[str] = Field(default=None)
+
     created_at: datetime = Field(default_factory=datetime.utcnow)
