@@ -12,9 +12,13 @@ and the user doesn't have to wait for the embedding process to complete.
 """
 
 import time
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks
+import json
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Depends
 from typing import List, Optional
+from sqlmodel import Session
 
+from database import get_session
+from models import Case
 from cloudinary_client import upload_pdf, upload_image
 
 # Image file extensions we accept
@@ -66,6 +70,7 @@ async def upload_pdfs(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
     case_id: Optional[int] = Form(default=None),
+    session: Session = Depends(get_session),
 ):
     """
     Accepts one or more PDF files from the client.
@@ -91,21 +96,15 @@ async def upload_pdfs(
         saved_paths.append(file_url)
 
         if case_id is not None:
-            from database import engine
-            from sqlmodel import Session
-            from models import Case
-            import json
-
-            with Session(engine) as session:
-                case = session.get(Case, case_id)
-                if case:
-                    pdfs_raw = getattr(case, 'pdf_paths_json', '[]') or '[]'
-                    current_pdfs = json.loads(pdfs_raw)
-                    current_pdfs.append(file_url)
-                    case.pdf_paths_json = json.dumps(current_pdfs)
-                    case.status = "pending"
-                    session.add(case)
-                    session.commit()
+            case = session.get(Case, case_id)
+            if case:
+                pdfs_raw = getattr(case, 'pdf_paths_json', '[]') or '[]'
+                current_pdfs = json.loads(pdfs_raw)
+                current_pdfs.append(file_url)
+                case.pdf_paths_json = json.dumps(current_pdfs)
+                case.status = "pending"
+                session.add(case)
+                session.commit()
 
             background_tasks.add_task(ingest_pdf_in_background, case_id, file_url)
 
@@ -121,6 +120,7 @@ async def upload_images(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
     case_id: Optional[int] = Form(default=None),
+    session: Session = Depends(get_session),
 ):
     """
     Accepts one or more image files from the client.
@@ -146,21 +146,15 @@ async def upload_images(
         saved_paths.append(file_url)
 
         if case_id is not None:
-            from database import engine
-            from sqlmodel import Session
-            from models import Case
-            import json
-
-            with Session(engine) as session:
-                case = session.get(Case, case_id)
-                if case:
-                    imgs_raw = getattr(case, 'image_paths_json', '[]') or '[]'
-                    current_images = json.loads(imgs_raw)
-                    current_images.append(file_url)
-                    case.image_paths_json = json.dumps(current_images)
-                    case.status = "pending"
-                    session.add(case)
-                    session.commit()
+            case = session.get(Case, case_id)
+            if case:
+                imgs_raw = getattr(case, 'image_paths_json', '[]') or '[]'
+                current_images = json.loads(imgs_raw)
+                current_images.append(file_url)
+                case.image_paths_json = json.dumps(current_images)
+                case.status = "pending"
+                session.add(case)
+                session.commit()
 
             background_tasks.add_task(ingest_image_in_background, case_id, file_url)
 

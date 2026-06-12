@@ -37,4 +37,10 @@ dependencies = [
     "mistralai[realtime]>=2.4.7",
     "langchain-mistralai>=1.1.4",
     "langchain-nvidia-ai-endpoints>=1.4.1",
+    "pytest>=9.0.3",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+# scratch/test_model.py has module-level network calls that hang during collection
+collect_ignore = ["scratch"]

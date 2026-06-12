@@ -25,9 +25,9 @@ class Case(SQLModel, table=True):
     # SQLite doesn't support arrays, so we store urls as a JSON string
     urls_json: str = Field(default="[]")
 
-    # A JSON string of a dictionary mapping urls to their generated Markdown summaries
-    # Example: '{"https://example.com": "# Example\\n\\nThis is an example site..."}'
-    url_summaries_json: str = Field(default="{}")
+
+    case_result_status: str = Field(default="active")
+    case_result_reason: Optional[str] = Field(default=None)
 
     # Same for PDF file paths on disk
     pdf_paths_json: str = Field(default="[]")

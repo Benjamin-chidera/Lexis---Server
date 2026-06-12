@@ -34,3 +34,4 @@ mistralai
 langchain-mistralai
 mistralai[realtime]
 langchain-nvidia-ai-endpoints
+pytest

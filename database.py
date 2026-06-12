@@ -8,14 +8,14 @@ from typing import Generator
 load_dotenv()
 
 # SQLite file configuration (Commented out)
-# DATABASE_URL = "sqlite:///./legal_assistant.db"
+DATABASE_URL = "sqlite:///./legal_assistant.db"
 # engine = create_engine(
 #     DATABASE_URL,
 #     connect_args={"check_same_thread": False},
 # )
 
 # Neon PostgreSQL configuration
-DATABASE_URL = os.getenv("DATABASE_URL")
+# DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL not found in environment variables")
@@ -23,6 +23,9 @@ if not DATABASE_URL:
 # pool_pre_ping: test connections before use so stale ones (e.g. after a
 # long LLM call where Neon closed the idle connection) are recycled silently.
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+
+SQLModel.metadata.drop_all(bind=engine)
+SQLModel.metadata.create_all(bind=engine)
 
 
 
@@ -33,23 +36,34 @@ def create_tables():
     # Add columns to existing alert tables that were created before
     # these fields were introduced. PostgreSQL's IF NOT EXISTS makes this
     # safe to run on every startup — it's a no-op when the column already exists.
-    with engine.connect() as conn:
-        conn.execute(
-            sqlalchemy_text(
-                "ALTER TABLE alert ADD COLUMN IF NOT EXISTS ai_reasoning TEXT"
+    if engine.dialect.name != "sqlite":
+        with engine.connect() as conn:
+            conn.execute(
+                sqlalchemy_text(
+                    "ALTER TABLE alert ADD COLUMN IF NOT EXISTS ai_reasoning TEXT"
+                )
             )
-        )
-        conn.execute(
-            sqlalchemy_text(
-                "ALTER TABLE alert ADD COLUMN IF NOT EXISTS review_status VARCHAR NOT NULL DEFAULT 'pending'"
+            conn.execute(
+                sqlalchemy_text(
+                    "ALTER TABLE alert ADD COLUMN IF NOT EXISTS review_status VARCHAR NOT NULL DEFAULT 'pending'"
+                )
             )
-        )
-        conn.execute(
-            sqlalchemy_text(
-                "ALTER TABLE alert ADD COLUMN IF NOT EXISTS rejection_reason TEXT"
+            conn.execute(
+                sqlalchemy_text(
+                    "ALTER TABLE alert ADD COLUMN IF NOT EXISTS rejection_reason TEXT"
+                )
             )
-        )
-        conn.commit()
+            conn.execute(
+                sqlalchemy_text(
+                    "ALTER TABLE \"case\" ADD COLUMN IF NOT EXISTS case_result_status VARCHAR NOT NULL DEFAULT 'pending'"
+                )
+            )
+            conn.execute(
+                sqlalchemy_text(
+                    "ALTER TABLE \"case\" ADD COLUMN IF NOT EXISTS case_result_reason TEXT"
+                )
+            )
+            conn.commit()
 
 
 def get_session() -> Generator[Session, None, None]:

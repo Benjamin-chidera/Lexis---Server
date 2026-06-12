@@ -1,24 +1,23 @@
 import json
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sqlmodel import Session, select
-from database import engine
+from database import get_session
 from models import CaseMessage
 
 router = APIRouter(prefix="/api", tags=["messages"])
 
 
 @router.get("/cases/{case_id}/messages")
-def get_case_messages(case_id: int):
+def get_case_messages(case_id: int, session: Session = Depends(get_session)):
     """
     Returns all chat messages for a case, ordered oldest first.
     Called when the user opens a case modal to restore conversation history.
     """
-    with Session(engine) as session:
-        messages = session.exec(
-            select(CaseMessage)
-            .where(CaseMessage.case_id == case_id)
-            .order_by(CaseMessage.created_at)
-        ).all()
+    messages = session.exec(
+        select(CaseMessage)
+        .where(CaseMessage.case_id == case_id)
+        .order_by(CaseMessage.created_at)
+    ).all()
 
     result = []
     for msg in messages:
