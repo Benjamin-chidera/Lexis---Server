@@ -27,8 +27,10 @@ load_dotenv()
 # MODEL = "granite3.2-vision:latest"
 # MODEL = "mistral-large-latest"
 # MODEL = "mistral-small-latest"
-# MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
-MODEL = "deepseek-ai/deepseek-v4-pro"
+# MODEL = "meta/llama-3.1-70b-instruct"
+# MODEL = "deepseek-ai/deepseek-v4-pro"
+MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+
 
 # 2. Embedding Model (Used for Vector Store)
 # Must be pulled in Ollama: ollama pull nomic-embed-text

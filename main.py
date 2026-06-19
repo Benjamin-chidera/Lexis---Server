@@ -113,7 +113,7 @@ async def lifespan(app: FastAPI):
 
         # Scan Postgres for pending or processing cases
         with Session(engine) as session:
-            statement = select(Case).where(Case.status.in_(["pending", "processing"]))
+            statement = select(Case).where(Case.status.in_(["pending", "processing", "failed"]))
             crashed_cases = session.exec(statement).all()
             
             for case in crashed_cases:
@@ -261,21 +261,23 @@ async def start_case(sid, data):
         await loop.run_in_executor(
             None,
             ingest_url_into_vector_store,
-            case_id,
+            case_id, 
             url,
         )
 
-    for img_path in image_paths:
+    for img_path in image_paths: 
         await loop.run_in_executor(
-            None,
+            None, 
             ingest_image_into_vector_store,
             case_id,
             img_path,
         )
 
     # Enqueue background research job
-    enqueue_research(case_id)
-
+    enqueue_research(case_id) 
+    
+    # Notify client that the case is created successfully
+    await sio.emit("case_created", {"case_id": case_id}, to=sid)
 
 @sio.event
 async def chat_message(sid, data):
@@ -290,7 +292,7 @@ async def chat_message(sid, data):
     asyncio.create_task(process_chat_message(case_id, content, sio, sid))
 
 
-# --- Voice Call event handlers ---
+# --- Voice Call event handlers --- 
 
 @sio.event
 async def start_call_session(sid, data):

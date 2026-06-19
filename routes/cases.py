@@ -230,3 +230,31 @@ def update_case_status(case_id: int, req: UpdateCaseStatusRequest, session: Sess
     session.commit()
 
     return {"message": f"Case {case_id} status updated"}
+
+
+@router.post("/api/cases/{case_id}/retry-research")
+def retry_research(case_id: int, session: Session = Depends(get_session)):
+    """
+    Retries failed background research for a case.
+
+    Resets the case status from "failed" back to "pending" and re-enqueues
+    the research job onto the RQ queue.
+    """
+    case = session.get(Case, case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail=f"Case {case_id} not found")
+
+    if case.status not in ("failed", "complete"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Case {case_id} has status '{case.status}' — only failed or complete cases can be retried.",
+        )
+
+    case.status = "pending"
+    session.add(case)
+    session.commit()
+
+    from ai.background import enqueue_research
+    enqueue_research(case_id)
+
+    return {"message": f"Research re-queued for case {case_id}"}

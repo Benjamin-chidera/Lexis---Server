@@ -65,8 +65,9 @@ def research_job(case_id: int) -> None:
         _set_status(case_id, "complete")
         return
 
-    max_retries = 3
-    retry_delay = 15  # seconds backoff factor
+    max_retries = 5
+    base_delay = 60  # seconds — base backoff factor
+    rate_limit_delay = 90  # seconds — longer wait specifically for 429 errors
     final_error = None
 
     for attempt in range(1, max_retries + 1):
@@ -79,11 +80,14 @@ def research_job(case_id: int) -> None:
             final_error = None
             break  # Success! Break the retry loop
         except Exception as error:
-            print(f"[worker] Research attempt {attempt}/{max_retries} failed for case {case_id}: {error}")
+            error_str = str(error)
+            is_rate_limit = "429" in error_str or "RateLimitError" in error_str or "Too Many Requests" in error_str
+            print(f"[worker] Research attempt {attempt}/{max_retries} failed for case {case_id} (rate_limit={is_rate_limit}): {error}")
             final_error = error
             if attempt < max_retries:
-                sleep_time = retry_delay * attempt
-                print(f"[worker] Waiting {sleep_time} seconds before retrying...")
+                # Use longer delay for rate limit errors so the API window resets
+                sleep_time = rate_limit_delay * attempt if is_rate_limit else base_delay * attempt
+                print(f"[worker] Waiting {sleep_time}s before retry {attempt + 1}/{max_retries}...")
                 time.sleep(sleep_time)
             else:
                 # Final failure
@@ -98,7 +102,7 @@ def research_job(case_id: int) -> None:
         case = session.get(Case, case_id)
         case.status = status
         session.add(case)
-        session.commit()
+        session.commit() 
 
         case_name = (case.context[:40] + "...") if case.context and len(case.context) > 40 else (case.context or f"Case #{case_id}")
 

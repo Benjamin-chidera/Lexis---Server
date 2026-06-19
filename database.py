@@ -24,8 +24,7 @@ if not DATABASE_URL:
 # long LLM call where Neon closed the idle connection) are recycled silently.
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
-SQLModel.metadata.drop_all(bind=engine)
-SQLModel.metadata.create_all(bind=engine)
+
 
 
 

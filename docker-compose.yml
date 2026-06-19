@@ -8,18 +8,55 @@ services:
       - redis_data:/data
     restart: always
 
-  # This is the UI for your background tasks
+  api:
+    build: .
+    container_name: legal-assistant-api
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - ENVIRONMENT=production
+    depends_on:
+      - redis
+    restart: always
+
+  worker:
+    build: .
+    container_name: legal-assistant-worker
+    command: ["/app/.venv/bin/python", "worker.py"]
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - ENVIRONMENT=production
+    depends_on:
+      - redis
+    restart: always
+
   dashboard:
     image: cjlapao/rq-dashboard:latest
     container_name: legal-assistant-dashboard
-    ports:
-      - "9181:9181"
     environment:
-      # We use the container name 'redis' here because Docker connects them
       - RQ_DASHBOARD_REDIS_URL=redis://redis:6379
     depends_on:
       - redis
     restart: always
 
+  caddy:
+    image: caddy:2
+    container_name: legal-assistant-proxy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=lexis-api.discoverbenix.com
+    command: caddy reverse-proxy --from https://lexis-api.discoverbenix.com --to http://api:8080
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+
 volumes:
   redis_data:
+  caddy_data:
+  caddy_config:

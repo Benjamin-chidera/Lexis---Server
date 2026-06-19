@@ -201,7 +201,8 @@ def run_chat_crew(context: str, vault_content: str, user_query: str) -> str:
         agents=[lexis_agent],
         tasks=[answer_task],
         process=Process.sequential,
-        verbose=False, 
+        verbose=False,
+        max_rpm=10,
     )
 
     result = crew.kickoff()
@@ -333,6 +334,212 @@ def _format_raw_research_dict(data: dict) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Model-agnostic JSON extraction helpers
+#
+# These functions handle the many different ways LLMs wrap structured output
+# so that switching models never breaks the formatted research memo.
+# ---------------------------------------------------------------------------
+
+import json
+import re
+import ast
+
+
+def _extract_json_from_raw_text(raw_text: str) -> dict | None:
+    """
+    Attempts every known extraction strategy to pull a JSON dict out of
+    an LLM's raw text output. Returns the parsed dict or None.
+
+    Handles:
+      - Clean JSON
+      - Markdown ```json ... ``` blocks
+      - "Final Answer": "{...}" (JSON-as-escaped-string)
+      - "Final Answer": { ... }  (JSON-as-dict)
+      - Outer wrappers like {"ResearchOutput": {...}}
+      - Brace-matching extraction as a last resort
+    """
+    if not raw_text:
+        return None
+
+    # --- Step 1: Strip markdown code fences ---
+    cleaned = raw_text
+    if "```json" in cleaned:
+        # Take the content inside the LAST ```json ... ``` block
+        parts = cleaned.split("```json")
+        last_block = parts[-1]
+        if "```" in last_block:
+            cleaned = last_block.split("```")[0].strip()
+    elif cleaned.startswith("```") and cleaned.endswith("```"):
+        cleaned = "\n".join(cleaned.split("\n")[1:-1]).strip()
+
+    # --- Step 2: Try direct JSON parse ---
+    parsed = _try_parse_json(cleaned)
+    if parsed:
+        return _unwrap_outer_keys(parsed)
+
+    # --- Step 3: Handle "Final Answer" wrapper ---
+    # Many models return: ... "Final Answer": "{...}" or "Final Answer": {...}
+    final_answer_match = re.search(
+        r'"Final Answer"\s*:\s*', raw_text, re.IGNORECASE
+    )
+    if final_answer_match:
+        after_key = raw_text[final_answer_match.end():].strip()
+
+        # Case A: The value is a JSON string (starts with quote)
+        if after_key.startswith('"'):
+            # Extract the string value — it may contain escaped JSON
+            try:
+                # Wrap in an object to let json.loads handle the escaping
+                wrapper = '{"__val__": ' + after_key.rstrip().rstrip("}").rstrip(",") + "}"
+                val = json.loads(wrapper).get("__val__", "")
+                inner = _try_parse_json(val)
+                if inner:
+                    return _unwrap_outer_keys(inner)
+            except Exception:
+                pass
+
+            # Brute force: find JSON substring inside the string value
+            inner_json = _extract_first_json_object(after_key)
+            if inner_json:
+                return _unwrap_outer_keys(inner_json)
+
+        # Case B: The value is a direct JSON object (starts with brace)
+        if after_key.startswith("{"):
+            inner_json = _extract_first_json_object(after_key)
+            if inner_json:
+                return _unwrap_outer_keys(inner_json)
+
+    # --- Step 4: Last resort — find the first valid JSON object anywhere ---
+    found = _extract_first_json_object(raw_text)
+    if found:
+        return _unwrap_outer_keys(found)
+
+    return None
+
+
+def _try_parse_json(text: str) -> dict | None:
+    """Try json.loads, then ast.literal_eval. Returns dict or None."""
+    try:
+        result = json.loads(text)
+        if isinstance(result, dict):
+            return result
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    try:
+        result = ast.literal_eval(text)
+        if isinstance(result, dict):
+            return result
+    except (ValueError, SyntaxError):
+        pass
+
+    return None
+
+
+def _extract_first_json_object(text: str) -> dict | None:
+    """
+    Finds the first '{' in text and uses brace-matching to extract
+    the complete JSON object. Handles nested braces correctly.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escape_next = False
+
+    for i in range(start, len(text)):
+        char = text[i]
+
+        if escape_next:
+            escape_next = False
+            continue
+
+        if char == "\\":
+            escape_next = True
+            continue
+
+        if char == '"' and not escape_next:
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = text[start:i + 1]
+                parsed = _try_parse_json(candidate)
+                if parsed:
+                    return parsed
+                break
+
+    return None
+
+
+def _unwrap_outer_keys(data: dict) -> dict:
+    """
+    Strip known wrapper keys that models add around the actual payload.
+    e.g. {"ResearchOutput": {...}} -> {...}
+         {"Final Answer": {...}}  -> {...}
+    """
+    wrapper_keys = ["ResearchOutput", "Final Answer", "final_answer", "output"]
+    for key in wrapper_keys:
+        if key in data and isinstance(data[key], dict):
+            data = data[key]
+            break
+        # Some models put the JSON as a string value under the key
+        if key in data and isinstance(data[key], str):
+            inner = _try_parse_json(data[key])
+            if inner:
+                data = inner
+                break
+    return data
+
+
+def _normalize_to_research_output(parsed: dict) -> "ResearchOutput | None":
+    """
+    Takes a raw parsed dict and normalises it into a valid ResearchOutput
+    Pydantic object. Handles field name variations across models.
+    Returns None if the dict cannot be normalised.
+    """
+    try:
+        normalized = dict(parsed)
+
+        # If liability_summary is a dict instead of a string, flatten it
+        if isinstance(normalized.get("liability_summary"), dict):
+            normalized["liability_summary"] = _flatten_liability_summary(
+                normalized["liability_summary"]
+            )
+
+        # Fix evidence items that use 'type' instead of 'evidence_type'
+        evidence = normalized.get("evidence_log", [])
+        if isinstance(evidence, list):
+            for item in evidence:
+                if isinstance(item, dict):
+                    if "evidence_type" not in item and "type" in item:
+                        item["evidence_type"] = item.pop("type")
+                    # Some models use 'url' instead of 'source_url'
+                    if "source_url" not in item and "url" in item:
+                        item["source_url"] = item.pop("url")
+                    # Some models use 'link' instead of 'source_url'
+                    if "source_url" not in item and "link" in item:
+                        item["source_url"] = item.pop("link")
+
+        # Some models use 'sources' instead of 'source_index'
+        if "source_index" not in normalized and "sources" in normalized:
+            normalized["source_index"] = normalized.pop("sources")
+
+        return ResearchOutput(**normalized)
+    except Exception:
+        return None
+
+
 def run_research_crew(case_context: str) -> tuple[str, str]:
     """
     Runs a background research crew that conducts adversarial legal research,
@@ -413,9 +620,9 @@ def run_research_crew(case_context: str) -> tuple[str, str]:
             "3. source_index: A complete list of all unique, real URLs found during the web search."
         ),
         agent=researcher,
-        # Force the LLM to return a validated Pydantic object.
-        # This prevents it from writing vague summaries without URLs.
-        output_pydantic=ResearchOutput,
+        # Our custom parser (_extract_json_from_raw_text + _normalize_to_research_output)
+        # handles structured output extraction for ALL models, so we don't need
+        # CrewAI's output_pydantic (which has a broken mistralai dependency).
     )
 
     crew = Crew(
@@ -423,6 +630,7 @@ def run_research_crew(case_context: str) -> tuple[str, str]:
         tasks=[research_task],
         process=Process.sequential,
         verbose=True,
+        max_rpm=10,
     )
 
     import time
@@ -444,53 +652,36 @@ def run_research_crew(case_context: str) -> tuple[str, str]:
             # Re-raise if it's not a rate limit error or we ran out of retries
             raise
 
-    # If pydantic output succeeded, convert it to a well-formatted Markdown string.
-    # This lets the rest of the app treat it as a plain string (no breaking changes).
+    # ---------------------------------------------------------------------------
+    # Model-agnostic output parsing
+    #
+    # Different LLMs return structured output in wildly different wrappers:
+    #   - Clean Pydantic object (ideal)
+    #   - Raw JSON string
+    #   - JSON inside markdown ```json ... ``` blocks
+    #   - "Final Answer": "{...}" (Gemma, Nemotron, smaller models)
+    #   - "Final Answer": { ... }  (dict, not string)
+    #   - Outer wrapper like {"ResearchOutput": {...}}
+    #
+    # The parser below tries every extraction strategy in order so that
+    # switching models never breaks the formatted output.
+    # ---------------------------------------------------------------------------
+    import json
+    import re
+
     output_obj = None
     raw_dict = None
 
+    # Strategy 1: CrewAI successfully parsed into Pydantic
     if hasattr(result, 'pydantic') and result.pydantic:
         output_obj = result.pydantic
     else:
-        # Fallback: try to manually parse the raw string into a dict
         raw_text = str(result).strip()
-        try:
-            import json
-            import ast
+        parsed = _extract_json_from_raw_text(raw_text)
 
-            # Clean markdown code blocks if present
-            if "```json" in raw_text:
-                raw_text = raw_text.split("```json")[1].split("```")[0].strip()
-            elif raw_text.startswith("```") and raw_text.endswith("```"):
-                raw_text = "\n".join(raw_text.split("\n")[1:-1]).strip()
-
-            try:
-                parsed = json.loads(raw_text)
-            except json.JSONDecodeError:
-                parsed = ast.literal_eval(raw_text)
-
-            # Unwrap the outer 'ResearchOutput' key if present
-            if "ResearchOutput" in parsed:
-                parsed = parsed["ResearchOutput"]
-
+        if parsed:
             raw_dict = parsed
-
-            # Try to normalize the dict into a valid ResearchOutput
-            normalized = dict(parsed)
-
-            # If liability_summary is a dict instead of a string, flatten it
-            if isinstance(normalized.get("liability_summary"), dict):
-                normalized["liability_summary"] = _flatten_liability_summary(normalized["liability_summary"])
-
-            # Fix evidence items that use 'type' instead of 'evidence_type'
-            if "evidence_log" in normalized and isinstance(normalized["evidence_log"], list):
-                for item in normalized["evidence_log"]:
-                    if "evidence_type" not in item and "type" in item:
-                        item["evidence_type"] = item.pop("type")
-
-            output_obj = ResearchOutput(**normalized)
-        except Exception:
-            pass  # Will fall through to raw_dict formatting or raw string
+            output_obj = _normalize_to_research_output(parsed)
 
     # Extract the ai_reasoning before formatting. Use the liability_summary
     # because it's the high-level "why this matters" paragraph — exactly what
