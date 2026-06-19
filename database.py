@@ -8,14 +8,14 @@ from typing import Generator
 load_dotenv()
 
 # SQLite file configuration (Commented out)
-DATABASE_URL = "sqlite:///./legal_assistant.db"
-# engine = create_engine(
-#     DATABASE_URL,
-#     connect_args={"check_same_thread": False},
-# )
+# DATABASE_URL = "sqlite:///./legal_assistant.db"
+# # engine = create_engine(
+# #     DATABASE_URL,
+# #     connect_args={"check_same_thread": False},
+# # )
 
 # Neon PostgreSQL configuration
-# DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL not found in environment variables")
