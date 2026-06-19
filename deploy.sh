@@ -9,9 +9,16 @@ echo "Deploying to $USER@$SERVER_IP..."
 # 1. Stop and disable Dokploy containers to free up port 80 and 443
 echo "Stopping Dokploy services (if running)..."
 ssh $USER@$SERVER_IP << 'EOF'
+  # Stop Dokploy containers
   docker stop dokploy-traefik dokploy || true
   docker rm dokploy-traefik dokploy || true
-  # Optionally stop any other dokploy containers if they conflict
+  
+  # Stop any native Nginx or Apache that might be hogging port 80/443
+  systemctl stop nginx || true
+  systemctl disable nginx || true
+  systemctl stop apache2 || true
+  systemctl disable apache2 || true
+
   mkdir -p /root/legal-assistant/server
 EOF
 
