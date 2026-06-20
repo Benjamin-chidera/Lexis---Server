@@ -1,13 +1,44 @@
-name: Deploy Server to VPS
+name: Server CI & CD
 
 on:
   push:
     branches:
-      - main # Change this to master if your default branch is master
+      - main
+  pull_request:
+    branches:
+      - main
 
 jobs:
-  deploy:
+  test:
+    name: Run Pytest Suite
     runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync
+
+      - name: Run Pytest
+        run: uv run pytest
+
+  deploy:
+    name: Deploy to VPS
+    needs: test
+    runs-on: ubuntu-latest
+    # Only run deployment on pushes to main branch, not on pull request builds
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
       - name: Checkout Code
