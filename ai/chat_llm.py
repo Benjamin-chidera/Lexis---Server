@@ -99,9 +99,9 @@ def run_chat_direct(
 
     if case_id:
         try:
-            from sqlmodel import Session
+            from sqlmodel import Session, select
             from database import engine
-            from models import Case
+            from models import Case, Alert
             
             with Session(engine) as session:
                 case = session.get(Case, case_id)
@@ -130,12 +130,23 @@ def run_chat_direct(
                     
                     # Background research status
                     status = getattr(case, 'status', 'pending')
-                    latest_research = getattr(case, 'background_research', '') or ''
+                    
+                    # Fetch alerts to see what the background research actually found
+                    alerts = session.exec(
+                        select(Alert).where(Alert.case_id == case_id).order_by(Alert.created_at.desc()).limit(3)
+                    ).all()
+                    
+                    latest_research = ""
+                    if alerts:
+                        for idx, alert in enumerate(alerts):
+                            latest_research += f"\n[Alert {idx+1}]: {alert.title}\nSummary: {alert.summary}\nAI Reasoning: {alert.ai_reasoning or 'None'}\n"
+                    else:
+                        latest_research = "No background research results yet."
                     
                     background_status_text = (
                         f"=== BACKGROUND TASKS & CASE RESEARCH ===\n"
                         f"Status: {status.upper()}\n"
-                        f"Latest background research: {latest_research}\n"
+                        f"Latest background research findings:\n{latest_research}\n"
                         f"If the status is 'processing' or 'pending', the background research task is currently running in the background. Explain this to the user."
                     )
                     
