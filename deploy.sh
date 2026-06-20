@@ -24,7 +24,7 @@ EOF
 
 # 2. Copy the necessary files over
 echo "Copying files to server..."
-scp docker-compose.yml Dockerfile pyproject.toml requirements.txt worker.py main.py database.py models.py auth.py run_worker.py cloudinary_client.py .env $USER@$SERVER_IP:/root/legal-assistant/server/
+scp docker-compose.yml Dockerfile pyproject.toml uv.lock requirements.txt worker.py main.py database.py models.py auth.py run_worker.py cloudinary_client.py .env $USER@$SERVER_IP:/root/legal-assistant/server/
 scp -r ai routes $USER@$SERVER_IP:/root/legal-assistant/server/
 
 # 3. Build and start the docker-compose stack
@@ -32,7 +32,8 @@ echo "Building and starting Docker Compose stack..."
 ssh $USER@$SERVER_IP << 'EOF'
   cd /root/legal-assistant/server
   docker compose down || true
-  docker compose up -d --build
+  docker compose build --no-cache
+  docker compose up -d
   echo "✅ Deployment successful! API is running."
   docker compose ps
 EOF
