@@ -44,6 +44,7 @@ sio = socketio.AsyncServer(
         "http://127.0.0.1:3000",
         # Production origin (no trailing slash)
         "https://lexis-pi.vercel.app",
+        "https://lexis.discoverbenix.com"
     ],
 )
 
