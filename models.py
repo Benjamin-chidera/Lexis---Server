@@ -27,7 +27,7 @@ class Case(SQLModel, table=True):
 
 
     case_result_status: str = Field(default="active")
-    case_result_reason: Optional[str] = Field(default=None)
+    case_result_reason: Optional[str] = Field(default=None, nullable=True)
 
     # Same for PDF file paths on disk
     pdf_paths_json: str = Field(default="[]")
