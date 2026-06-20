@@ -135,11 +135,10 @@ server/
 ├── run_worker.py          # Script to run the RQ worker (SimpleWorker)
 ├── cloudinary_client.py   # Cloudinary upload helpers
 ├── .env                   # Environment variables
-├── requirements.txt       # Legacy pip requirements
 ├── pyproject.toml         # Python project metadata and dependencies
 ├── uv.lock                # Locked dependency tree for 'uv'
 ├── Dockerfile             # Container definition
-├── fly.toml               # Fly.io deployment config
+├── .github/workflows/     # GitHub Actions CI/CD workflows
 │
 ├── routes/                # FastAPI HTTP route handlers
 │   ├── auth.py            # Login, registration, admin setup
@@ -274,13 +273,10 @@ The `ai/` folder contains all intelligence logic:
 
 ## Deployment
 
-The server includes a `Dockerfile` and a `fly.toml` for deployment to [Fly.io](https://fly.io/).
+The server is deployed to a Hostinger VPS using Docker Compose.
 
 **Key deployment notes:**
-- The Dockerfile uses a multi-stage build.
-- The start command is `uvicorn main:app --host 0.0.0.0 --port 8080`.
-- The `fly.toml` defines two processes:
-  - `web`: The FastAPI/SocketIO server.
-  - `worker`: The `run_worker.py` script.
-- Ensure all environment variables are set in your production environment (e.g., `fly secrets set DATABASE_URL=...`).
-- A production Redis instance (e.g., Upstash) must be provisioned and linked via `REDIS_URL`.
+- The deployment is automated via GitHub Actions (configured in `.github/workflows/deploy.yml`).
+- Docker Compose manages four services: `api`, `worker`, `redis`, `dashboard` (rq-dashboard), and `caddy` (reverse proxy).
+- Ensure all environment variables are set in the `.env` file on the VPS server under `/root/legal-assistant/server/.env`.
+- Caddy automatically provisions SSL certificates for `lexis-api.discoverbenix.com`.
