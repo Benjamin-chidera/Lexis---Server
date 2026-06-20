@@ -20,7 +20,7 @@ services:
   worker:
     build: .
     container_name: legal-assistant-worker
-    command: ["/app/.venv/bin/python", "worker.py"]
+    command: ["/app/.venv/bin/python", "run_worker.py"]
     env_file: .env
     environment:
       - REDIS_URL=redis://redis:6379
