@@ -31,6 +31,8 @@ jobs:
         run: uv sync
 
       - name: Run Pytest
+        env:
+          PYTHONPATH: .
         run: uv run pytest
 
   deploy:
