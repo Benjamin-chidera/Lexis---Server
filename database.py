@@ -20,9 +20,19 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL not found in environment variables")
 
-# pool_pre_ping: test connections before use so stale ones (e.g. after a
-# long LLM call where Neon closed the idle connection) are recycled silently.
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+# SQLite needs different connection arguments than PostgreSQL.
+# We detect which database we're talking to by checking the URL prefix.
+if DATABASE_URL.startswith("sqlite"):
+    # SQLite does not support pool_pre_ping and requires check_same_thread=False
+    # when used across multiple threads (e.g. during testing).
+    engine = create_engine(
+        DATABASE_URL,
+        connect_args={"check_same_thread": False},
+    )
+else:
+    # pool_pre_ping: test connections before use so stale ones (e.g. after a
+    # long LLM call where Neon closed the idle connection) are recycled silently.
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 
 
