@@ -72,7 +72,7 @@ def research_job(case_id: int) -> None:
 
     for attempt in range(1, max_retries + 1):
         try:
-            research_result, ai_reasoning = run_research_crew(context)
+            research_result, ai_reasoning = run_research_crew(case_id, context)
             severity = "strategic" if len(research_result) > 400 else "routine"
             title = f"Research Ready: Case #{case_id}" 
             summary = research_result
@@ -100,6 +100,12 @@ def research_job(case_id: int) -> None:
     # Always update the case status
     with Session(engine) as session:
         case = session.get(Case, case_id)
+        if not case:
+            print(f"[worker] Case {case_id} was deleted during research. Aborting alert creation.")
+            if final_error:
+                raise final_error
+            return
+
         case.status = status
         session.add(case)
         session.commit() 

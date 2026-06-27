@@ -97,23 +97,16 @@ def reject_alert(alert_id: int, req: RejectAlertRequest, session: Session = Depe
     session.add(alert)
     session.commit()
 
-    # Append the rejection feedback to the parent case context
-    # so the AI agent uses it in the next research pass
+    # Re-queue research so the AI agent addresses the rejection.
+    # The rejection_reason is stored on the Alert record above and will be
+    # fetched dynamically at prompt-build time — we do NOT mutate case.context.
     if alert.case_id:
         case = session.get(Case, alert.case_id)
         if case:
-            feedback_block = (
-                "\n\n[ATTORNEY FEEDBACK — Previous research was rejected]\n"
-                f"Reason: {req.reason}\n"
-                "Please address this feedback and avoid the same issues "
-                "in the next research pass."
-            )
-            case.context = (case.context or "") + feedback_block
             case.status = "pending"
             session.add(case)
             session.commit()
 
-            # Re-enqueue research for this case with the updated context
             from ai.background import enqueue_research
             enqueue_research(case.id)
 

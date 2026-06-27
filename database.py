@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from sqlmodel import create_engine, SQLModel, Session
+from sqlmodel import create_engine, SQLModel, Session, select
 from sqlalchemy import text as sqlalchemy_text
 from typing import Generator
 

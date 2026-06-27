@@ -105,7 +105,8 @@ class EvidenceItem(BaseModel):
             "The FULL, complete URL starting with https://. "
             "NEVER truncate. NEVER use partial URLs. "
             "Example: 'https://www.reuters.com/full/path/to/article'. "
-            "If no URL is available, use the exact court docket identifier."
+            "If no URL is available, write 'URL: Available upon request from court records'. "
+            "Do NOT guess or invent a broken link."
         )
     )
     evidence_type: str = Field(description="One of: URL, PDF Record, Court Docket, Media/Image")
@@ -116,18 +117,42 @@ class EvidenceItem(BaseModel):
         # Strip whitespace to avoid hidden truncation
         v = v.strip()
 
-        # If it looks like a truncated URL (no http and not a docket number), flag it
-        if v and not v.startswith('http') and 'No.' not in v and 'Docket' not in v:
+        # If it looks like a truncated URL (no http, not a docket, and not court records warning), flag it
+        if v and not v.startswith('http') and 'No.' not in v and 'Docket' not in v and 'Available upon request' not in v:
             # Prefix a warning so it's visible in the UI
             return f"[INCOMPLETE URL — check source] {v}"
 
         return v
 
 
+class LeverageStrategy(BaseModel):
+    """Tactical leverage analysis produced after the liability summary and evidence log."""
+    settlement_trigger: str = Field(
+        description=(
+            "The single most powerful fact from the Evidence Log that creates "
+            "maximum settlement pressure on the opposing party."
+        )
+    )
+    barriers_to_defense: str = Field(
+        description=(
+            "The opponent's most likely defense, followed by the direct "
+            "counter-argument grounded in the statutes or evidence cited."
+        )
+    )
+    next_tactical_move: str = Field(
+        description=(
+            "The exact recommended next step to force a win — e.g. file an "
+            "interim injunction, issue a preservation order, send a Pre-Action "
+            "Protocol letter citing the specific regulatory notice."
+        )
+    )
+
+
 class ResearchOutput(BaseModel):
     # The full structured output of the research task
     liability_summary: str = Field(description="High-level summary of the opponent's legal vulnerabilities")
     evidence_log: List[EvidenceItem] = Field(description="List of all evidence items found, each with a source URL")
+    leverage_strategy: LeverageStrategy = Field(description="Tactical Leverage Analysis: settlement trigger, barriers to defense, and next tactical move")
     source_index: List[str] = Field(description="A complete list of ALL relevant URLs found during the search for further reading")
 
 
@@ -169,9 +194,26 @@ def run_chat_crew(context: str, vault_content: str, user_query: str) -> str:
             "brackets like [Source: contract.pdf, Page 3] or [Source: pacer.gov]."
         ),
         backstory=(
-            "You are Lexis AI, an expert legal research assistant. "
+            "You are Lexis AI, an expert civil litigation research assistant. "
             "You have been given extracted text from case documents and web pages. "
-            "You answer questions clearly and always cite the source of each fact."
+            "You answer questions clearly and always cite the source of each fact. "
+            "[LEGAL CLASSIFICATION PROTOCOL]\n"
+            "CIVIL VS. CRIMINAL: If you identify a precedent or statute that is criminal "
+            "in nature (e.g., Computer Misuse Act 1990), do not discard it. Instead, label "
+            "it explicitly under a section titled 'CRIMINAL LEVERAGE OPPORTUNITIES.' "
+            "You must clearly distinguish between Civil Remedies (Injunctions, Damages) and "
+            "Criminal Liability (Police Referral, Prosecution). "
+            "When citing criminal statutes, clearly state: 'This is a criminal statute. It "
+            "establishes potential grounds for a police report, which could be used as leverage "
+            "to accelerate a civil settlement.' "
+            "ZERO HALLUCINATION: You are strictly prohibited from fabricating cases. If you "
+            "cite a criminal statute, quote the actual text of the Act. Do not invent cases "
+            "like 'R v Smith' to fit the statute. If a fact or citation is not in the "
+            "provided documents, you must state: 'The provided sources do not contain this "
+            "information.'\n\n"
+            "CITATION AND URL PROTOCOL:\n"
+            "- You are NOT allowed to guess or fabricate URLs. If you cite a case, use the correct BAILII citation format (e.g., [2022] CSIH 45). "
+            "If you do not have the live URL returned by the search tool, simply write 'URL: Available upon request from court records' instead of inventing a broken link."
         ),
         llm=llm,
         tools=search_tools,
@@ -188,11 +230,35 @@ def run_chat_crew(context: str, vault_content: str, user_query: str) -> str:
             "use your search tool to find the required information online. "
             "Provide a clear, detailed answer. "
             "Cite your sources using [Source: ...] inline after each key fact. "
-            "If you used the web search, cite the URL."
+            "If you used the web search, cite the URL.\n\n"
+            "[LEGAL CLASSIFICATION PROTOCOL]\n"
+            "1. CIVIL VS. CRIMINAL DISTINCTION: If you identify a precedent or statute that is "
+            "criminal in nature (e.g., Computer Misuse Act 1990), do NOT discard it. Instead, "
+            "label it explicitly under a section titled 'CRIMINAL LEVERAGE OPPORTUNITIES.' "
+            "Clearly distinguish between Civil Remedies (Injunctions, Damages) and Criminal "
+            "Liability (Police Referral, Prosecution).\n"
+            "2. ADVISORY NOTE: When citing criminal statutes, clearly state: 'This is a criminal "
+            "statute. It establishes potential grounds for a police report, which could be used "
+            "as leverage to accelerate a civil settlement.'\n"
+            "3. ZERO HALLUCINATION: You are strictly prohibited from fabricating cases. If you "
+            "cite a criminal statute (e.g., Computer Misuse Act 1990), quote the actual text of "
+            "the Act. Do not invent cases like 'R v Smith' to fit the statute. If a fact or "
+            "citation is not in the provided documents or search results, state: 'The provided "
+            "sources do not contain this information.'\n"
+            "4. SELF-REVIEW: Before finalising your response, review every citation "
+            "(Case Name, Year, Court). If you cannot verify that the citation exists in "
+            "the provided documents or search results, delete it from your response entirely. "
+            "An uncited fact is better than a fabricated citation.\n"
+            "5. CITATION & URL PROTOCOL: You are NOT allowed to guess or fabricate URLs. If you cite a case, "
+            "use the correct BAILII citation format (e.g., [2022] CSIH 45). If you do not have the live URL, "
+            "simply write 'URL: Available upon request from court records' instead of inventing a broken link."
         ),
         expected_output=(
             "A well-reasoned answer to the user's legal question with inline "
-            "citations pointing back to the source documents."
+            "citations pointing back to the source documents. Every citation must "
+            "be verifiable from the provided case documents or search results. "
+            "Criminal statutes must be clearly labeled under CRIMINAL LEVERAGE OPPORTUNITIES. "
+            "No fabricated cases."
         ),
         agent=lexis_agent,
     )
@@ -275,6 +341,14 @@ def _format_research_output(output: "ResearchOutput") -> str:
         lines.append(f"{item.summary}")
         lines.append(f"[Source]({item.source_url})")
 
+    # Leverage & Winning Strategy section
+    leverage = output.leverage_strategy
+    lines.append("\n---")
+    lines.append("\n### LEVERAGE & WINNING STRATEGY")
+    lines.append(f"\n**SETTLEMENT TRIGGER**\n{leverage.settlement_trigger}")
+    lines.append(f"\n**BARRIERS TO DEFENSE**\n{leverage.barriers_to_defense}")
+    lines.append(f"\n**NEXT TACTICAL MOVE**\n{leverage.next_tactical_move}")
+
     lines.append("\n### Full Source Index (For Further Reading)")
     for url in output.source_index:
         lines.append(f"- [{url}]({url})")
@@ -320,6 +394,21 @@ def _format_raw_research_dict(data: dict) -> str:
                     lines.append(f"[Source]({url})")
             else:
                 lines.append(f"- {str(item)}")
+
+    # Leverage & Winning Strategy section (raw dict fallback)
+    leverage = data.get("leverage_strategy", {})
+    if isinstance(leverage, dict) and leverage:
+        lines.append("\n---")
+        lines.append("\n### LEVERAGE & WINNING STRATEGY")
+        settlement = leverage.get("settlement_trigger", "")
+        barriers = leverage.get("barriers_to_defense", "")
+        next_move = leverage.get("next_tactical_move", "")
+        if settlement:
+            lines.append(f"\n**SETTLEMENT TRIGGER**\n{settlement}")
+        if barriers:
+            lines.append(f"\n**BARRIERS TO DEFENSE**\n{barriers}")
+        if next_move:
+            lines.append(f"\n**NEXT TACTICAL MOVE**\n{next_move}")
 
     # Source index
     sources = data.get("source_index", [])
@@ -535,15 +624,35 @@ def _normalize_to_research_output(parsed: dict) -> "ResearchOutput | None":
         if "source_index" not in normalized and "sources" in normalized:
             normalized["source_index"] = normalized.pop("sources")
 
+        # Normalise leverage_strategy — some models may use alternative key names
+        if "leverage_strategy" not in normalized:
+            for alt_key in ["leverage", "winning_strategy", "tactical_leverage", "strategy"]:
+                if alt_key in normalized and isinstance(normalized[alt_key], dict):
+                    normalized["leverage_strategy"] = normalized.pop(alt_key)
+                    break
+
+        # If leverage_strategy is still missing, provide safe defaults so
+        # Pydantic validation doesn't fail on older research results
+        if "leverage_strategy" not in normalized:
+            normalized["leverage_strategy"] = {
+                "settlement_trigger": "Not available — run a new research cycle to generate tactical analysis.",
+                "barriers_to_defense": "Not available — run a new research cycle to generate tactical analysis.",
+                "next_tactical_move": "Not available — run a new research cycle to generate tactical analysis.",
+            }
+
         return ResearchOutput(**normalized)
     except Exception:
         return None
 
 
-def run_research_crew(case_context: str) -> tuple[str, str]:
+def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
     """
     Runs a background research crew that conducts adversarial legal research,
     hunting for precedents, regulatory fines, and court rulings.
+
+    Dynamically fetches:
+      - Vault evidence from the vector store (PDFs, URLs, images)
+      - Attorney rejection feedback from the latest rejected Alert record
 
     Every finding MUST include an inline citation (URL or docket number).
     Includes a full Source Index of all sites searched for further reading.
@@ -551,6 +660,46 @@ def run_research_crew(case_context: str) -> tuple[str, str]:
     ai_reasoning is a short explanation of why this result is relevant and
     how it can help win the case.
     """
+
+    # -----------------------------------------------------------------------
+    # 1. Fetch vault evidence from the vector store for this case
+    # -----------------------------------------------------------------------
+    from .vector_store import search_vector_store
+    vault_chunks = search_vector_store(case_id, case_context, top_k=15)
+    vault_evidence = "\n\n---\n\n".join(vault_chunks) if vault_chunks else "(No vault evidence available)"
+
+    # -----------------------------------------------------------------------
+    # 2. Fetch the latest rejection feedback from the Alert table
+    # -----------------------------------------------------------------------
+    rejection_reason = ""
+    try:
+        from sqlmodel import Session, select
+        from database import engine
+        from models import Alert
+
+        with Session(engine) as db_session:
+            latest_rejected = db_session.exec(
+                select(Alert)
+                .where(Alert.case_id == case_id)
+                .where(Alert.review_status == "rejected")
+                .order_by(Alert.created_at.desc())
+            ).first()
+            if latest_rejected and latest_rejected.rejection_reason:
+                rejection_reason = latest_rejected.rejection_reason
+    except Exception as e:
+        print(f"[crew] Failed to fetch rejection feedback for case {case_id}: {e}")
+
+    # -----------------------------------------------------------------------
+    # 3. Build the system prompt sections
+    # -----------------------------------------------------------------------
+    rejection_block = ""
+    if rejection_reason:
+        rejection_block = (
+            "\n\nATTORNEY REJECTION FEEDBACK (MANDATORY — treat as direct order from Managing Partner):\n"
+            f"{rejection_reason}\n\n"
+            "You MUST specifically address this feedback and correct your previous mistakes. "
+            "Pivot your research strategy entirely to satisfy this exact requirement."
+        )
 
     # Load Tavily search tool if configured
     search_tools = []
@@ -561,7 +710,7 @@ def run_research_crew(case_context: str) -> tuple[str, str]:
         try:
             from langchain_tavily import TavilySearch
             from crewai.tools import tool as crewai_tool
-            _tavily = TavilySearch(max_results=5)  # 5 results per query for a richer source index
+            _tavily = TavilySearch(max_results=5)
 
             @crewai_tool("Tavily Web Search")
             def tavily_search(query: str) -> str:
@@ -573,56 +722,114 @@ def run_research_crew(case_context: str) -> tuple[str, str]:
             pass
 
     researcher = Agent(
-        role="Corporate Litigation and Liability Research Agent",
+        role="Lexis Adversarial Legal Research Agent",
         goal=(
-            "Execute a targeted deep-dive to uncover operational liabilities, data loss events, and security vulnerabilities. "
-            "Focus 100% on actionable legal data including active/pending lawsuits, regulatory enforcement actions, "
-            "material corporate liabilities, and community organizing for legal recourse. "
-            "You must filter all information through a strict legal and compliance lens. "
-            "You must provide a direct path (URL, PDF link, or Docket) for every piece of evidence."
+            "Synthesize internal client evidence (VAULT EVIDENCE) with public legal precedents "
+            "to build an aggressive, highly accurate, and actionable legal memo for a Managing Partner. "
+            "Focus on hard timelines, physical evidence (e.g., missing hazard signs from photos), "
+            "and contradictions found in the vault evidence. The 'smoking guns' are in the vault. "
+            "After generating the Liability Summary and Evidence Log, you MUST perform a Tactical "
+            "Leverage Analysis identifying the settlement trigger, barriers to defense, and the "
+            "next tactical move."
         ),
         backstory=(
-            "You are a specialized Corporate Litigation and Liability Research Agent. "
-            "You prioritize operational realities over historical or technical documentation. "
-            "You ignore literal keyword matches related to historical patents, physical science, entertainment, or abstract definitions. "
-            "You don't just read the news; you hunt for the raw documents, the original PDF filings, "
-            "the official government records, and the photographic evidence that others miss. "
-            "You provide the exact links to the source material so that the attorney can "
-            "download the records immediately."
+            "You are an elite Senior Civil Litigation Strategist and Forensic Evidence Auditor. "
+            "Your objective is to synthesize internal client evidence with public legal precedents "
+            "to build an aggressive, highly accurate, and actionable legal memo.\n\n"
+
+            "EVIDENCE SYNTHESIS PROTOCOL:\n"
+            "You must read the VAULT EVIDENCE and connect it directly to the CASE CONTEXT. "
+            "Look for hard timelines, physical evidence (e.g., missing hazard signs from photos), "
+            "and contradictions. Do not rely solely on the case context; the 'smoking guns' are "
+            "in the vault evidence.\n\n"
+
+            "ZERO HALLUCINATION PROTOCOL:\n"
+            "You are strictly prohibited from inventing case law, citations, or URLs. "
+            "If you cannot verify a specific case name, year, and court using your research "
+            "capabilities, do not include it. An uncited fact is better than a fabricated citation.\n\n"
+
+            "CIVIL LAW STRICT COMPLIANCE:\n"
+            "This is civil litigation. You must apply the 'balance of probabilities' standard. "
+            "Do not cite Criminal Court cases (e.g., citations containing 'Crim' or 'R v.') as "
+            "civil precedents.\n\n"
+
+            "CRIMINAL LEVERAGE EXCEPTION:\n"
+            "You may cite criminal statutes (e.g., Computer Misuse Act, Fraud Act) ONLY if you "
+            "explicitly separate them under a 'Criminal Leverage' heading, noting that they "
+            "establish grounds for a police report to be used as leverage to accelerate a civil "
+            "settlement.\n\n"
+
+            "CITATION AND URL PROTOCOL:\n"
+            "- You are NOT allowed to guess or fabricate URLs.\n"
+            "- If you cite a case, use the correct BAILII citation format (e.g., [2022] CSIH 45).\n"
+            "- If you do not have the live URL returned by your search tool, write "
+            "'URL: Available upon request from court records' instead of inventing a broken link."
         ),
         llm=llm,
         tools=search_tools,
-        verbose=True,       # Shows tool calls so we can debug if it skips search
-        max_iter=5,         # Prevents infinite loops or single-step deadlocks
+        verbose=True,
+        max_iter=5,
     )
 
     research_task = Task(
         description=(
-            f"Conduct an intense, adversarial legal research hunt regarding the following case:\n"
-            f"{case_context[:800]}\n\n"
-            "Use your Tavily Web Search tool to locate real legal findings. Treat every search query as a mission to uncover liabilities that can be used in a legal memo or court strategy.\n"
-            "CRITICAL RELEVANCE FILTERS (What to Keep vs. What to Drop):\n"
-            "- DROP IT: Completely ignore literal keyword matches that fall under historical patents, physical science, entertainment, or abstract definitions (e.g., if researching 'Antigravity', do not pull propulsion systems, gravity physics, or patented shoes).\n"
-            "- KEEP IT: Focus 100% on actionable legal data, including active/pending lawsuits (individual or class-action), regulatory enforcement actions (FTC, SEC, GDPR, consumer protection), material corporate liabilities (catastrophic product failures, data loss incidents, data exfiltration, or breach of enterprise service agreements), and community organizing for legal recourse (e.g., developer or consumer groups preparing class actions).\n\n"
-            "EVIDENCE LOG EXPECTATIONS:\n"
-            "Your Evidence Log must only contain sources that establish corporate fault, financial/data damages, or legal risk. If a source does not contribute directly to building a legal case or assessing corporate liability, it is irrelevant—do not include it.\n\n"
+            "SYSTEM ROLE: You are an elite Senior Civil Litigation Strategist and Forensic Evidence Auditor.\n\n"
+
+            f"CASE CONTEXT (original attorney notes — DO NOT modify):\n{case_context[:800]}\n\n"
+
+            f"VAULT EVIDENCE (extracted text from uploaded PDFs, OCR descriptions of images, "
+            f"and scraped URLs — treat as absolute verified fact):\n{vault_evidence[:3000]}\n\n"
+
+            f"{rejection_block}"
+
+            "CORE DIRECTIVES:\n\n"
+
+            "1. EVIDENCE SYNTHESIS: Read the VAULT EVIDENCE and connect it directly to the CASE CONTEXT. "
+            "Look for hard timelines, physical evidence, and contradictions. The 'smoking guns' are in "
+            "the vault evidence, not just the case context.\n\n"
+
+            "2. ZERO HALLUCINATION: You are strictly prohibited from inventing case law, citations, or URLs. "
+            "If you cannot verify a specific case name, year, and court, do not include it.\n\n"
+
+            "3. CIVIL LAW COMPLIANCE: Apply 'balance of probabilities'. Do NOT cite Criminal Court cases "
+            "(e.g., 'Crim', 'R v.') as civil precedents.\n\n"
+
+            "4. CRIMINAL LEVERAGE EXCEPTION: You may cite criminal statutes ONLY under a separate "
+            "'CRIMINAL LEVERAGE OPPORTUNITIES' heading, noting they establish grounds for a police "
+            "report to accelerate a civil settlement.\n\n"
+
+            "5. Use your Tavily Web Search tool to locate real legal findings.\n\n"
+
+            "RELEVANCE FILTERS:\n"
+            "- DROP: historical patents, physical science, entertainment, abstract definitions.\n"
+            "- KEEP: active/pending lawsuits, regulatory enforcement, material corporate liabilities, "
+            "data breach incidents, community organising for legal recourse.\n\n"
+
+            "TACTICAL LEVERAGE ANALYSIS (REQUIRED):\n"
+            "After the Liability Summary and Evidence Log, answer:\n"
+            "1. SETTLEMENT TRIGGER: The single most powerful fact creating maximum settlement pressure.\n"
+            "2. BARRIERS TO DEFENSE: The opponent's most likely defense and the direct counter-argument.\n"
+            "3. NEXT TACTICAL MOVE: The exact recommended next step to force a win.\n\n"
+
+            "SELF-REVIEW: Before finalising, review every citation. If it cannot be verified from "
+            "your search results or vault evidence, delete it. An uncited fact is better than a "
+            "fabricated citation.\n\n"
+
             "CRITICAL CONSTRAINTS:\n"
-            "- You must ONLY report real search results and real URLs returned by Tavily.\n"
-            "- NEVER fabricate or synthesize fake lawsuits, fake court filings, or fake URLs.\n"
-            "- DO NOT use placeholder URLs (like '#' or truncated links).\n"
-            "- Focus explicitly on operational liabilities, enterprise data security breaches, and grounds for potential class-action lawsuits. Omit all historical patents completely.\n"
-            "- Absolutely NO disclaimers, notes, or meta-talk about simulated research or tool limitations are allowed."
+            "- Only report real search results and real URLs from Tavily.\n"
+            "- NEVER fabricate lawsuits, court filings, or URLs.\n"
+            "- Use BAILII citation format for cases.\n"
+            "- NO placeholder URLs, truncated links, or '#' links.\n"
+            "- NO disclaimers or meta-talk about simulated research."
         ),
         expected_output=(
             "A structured JSON object matching the ResearchOutput schema containing:\n"
             "1. liability_summary: A detailed, professional summary of actual legal liabilities and insights found (strictly no disclaimers or simulated text).\n"
             "2. evidence_log: A list of actual evidence items found, each with a real title, detailed summary, full complete source URL, and type.\n"
-            "3. source_index: A complete list of all unique, real URLs found during the web search."
+            "3. leverage_strategy: An object with three fields — settlement_trigger (the single most powerful fact creating settlement pressure), barriers_to_defense (the opponent's likely defense and the direct counter-argument), and next_tactical_move (the exact recommended next step to force a win).\n"
+            "4. source_index: A complete list of all unique, real URLs found during the web search."
         ),
         agent=researcher,
-        # Our custom parser (_extract_json_from_raw_text + _normalize_to_research_output)
-        # handles structured output extraction for ALL models, so we don't need
-        # CrewAI's output_pydantic (which has a broken mistralai dependency).
     )
 
     crew = Crew(
