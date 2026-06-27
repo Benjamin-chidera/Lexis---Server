@@ -149,8 +149,7 @@ class TestAlerts:
 
         # Verify DB updates on the parent case
         session.refresh(case)
-        assert "ATTORNEY FEEDBACK" in case.context
-        assert rejection_reason in case.context
+        assert case.context == "Original context"  # Context remains untouched
         assert case.status == "pending"
 
         # Verify that background research task was queued with correct ID
