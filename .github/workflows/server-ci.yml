@@ -40,15 +40,30 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    env:
+      IMAGE_NAME: legal-assistant-api
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Validate and set Docker namespace
+        id: set-namespace
+        run: |
+          NAMESPACE="${{ vars.DOCKERHUB_USERNAME }}"
+          if [ -z "$NAMESPACE" ]; then
+            NAMESPACE="${{ secrets.DOCKERHUB_USERNAME }}"
+          fi
+          if [ -z "$NAMESPACE" ]; then
+            echo "::error::Docker namespace is empty. Please set DOCKERHUB_USERNAME under either Actions Secrets or Repository Variables."
+            exit 1
+          fi
+          echo "namespace=$NAMESPACE" >> $GITHUB_OUTPUT
+
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ steps.set-namespace.outputs.namespace }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Set up Docker Buildx
@@ -61,8 +76,8 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/legal-assistant-api:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/legal-assistant-api:${{ github.sha }}
+            ${{ steps.set-namespace.outputs.namespace }}/${{ env.IMAGE_NAME }}:latest
+            ${{ steps.set-namespace.outputs.namespace }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
