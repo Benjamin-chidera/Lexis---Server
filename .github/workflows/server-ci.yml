@@ -90,11 +90,25 @@ jobs:
     steps:
       - name: Deploy via Dokploy API
         run: |
-          curl -X 'POST' \
+          response=$(curl -s -w "\n%{http_code}" -X 'POST' \
             '${{ secrets.DOKPLOY_URL }}/api/application.deploy' \
             -H 'accept: application/json' \
             -H 'x-api-key: ${{ secrets.DOKPLOY_API_KEY }}' \
             -H 'Content-Type: application/json' \
+            --connect-timeout 10 \
+            --max-time 30 \
             -d '{
               "applicationId": "${{ secrets.DOKPLOY_APP_ID }}"
-            }'
+            }')
+          
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+          
+          echo "HTTP Status Code: $http_code"
+          echo "Response Body: $body"
+          
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "Deployment trigger failed with HTTP status $http_code"
+            exit 1
+          fi
+
