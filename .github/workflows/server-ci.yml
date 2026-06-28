@@ -41,7 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     env:
-      IMAGE_NAME: legal-assistant-api
+      IMAGE_NAME: lexis
 
     steps:
       - name: Checkout Code
