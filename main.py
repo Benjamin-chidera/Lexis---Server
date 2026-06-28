@@ -167,6 +167,11 @@ def root():
     return {"message": "Legal Assistant Server is running"}
 
 
+@fastapi_app.get("/health")
+def health_check():
+    return {"status": "healthy"}
+
+
 # --- Socket.IO event handlers ---
 
 @sio.event

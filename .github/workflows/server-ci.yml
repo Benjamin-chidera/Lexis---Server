@@ -35,45 +35,51 @@ jobs:
           PYTHONPATH: .
         run: uv run pytest
 
-  deploy:
-    name: Deploy to VPS
+  build-and-push:
+    name: Build & Push Docker Image
     needs: test
     runs-on: ubuntu-latest
-    # Only run deployment on pushes to main branch, not on pull request builds
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Copy files to VPS
-        uses: appleboy/scp-action@master
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
         with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USERNAME }}
-          key: ${{ secrets.SSH_KEY }}
-          source: "docker-compose.yml,Dockerfile,pyproject.toml,uv.lock,requirements.txt,worker.py,main.py,database.py,models.py,auth.py,run_worker.py,cloudinary_client.py,ai,routes"
-          target: "/root/legal-assistant/server"
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: SSH and Restart Containers
-        uses: appleboy/ssh-action@master
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v6
         with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USERNAME }}
-          key: ${{ secrets.SSH_KEY }}
-          script: |
-            cd /root/legal-assistant/server
-            
-            # Stop Dokploy/Apache/Nginx if running
-            docker stop dokploy-traefik dokploy || true
-            docker rm dokploy-traefik dokploy || true
-            systemctl stop nginx || true
-            systemctl stop apache2 || true
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/legal-assistant-api:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/legal-assistant-api:${{ github.sha }}
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-            # Pull/Build and restart containers
-            docker compose down || true
-            docker compose build --no-cache
-            docker compose up -d
-            
-            # Verify status
-            docker compose ps
+  deploy:
+    name: Trigger Dokploy Deployment
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via Dokploy API
+        run: |
+          curl -X 'POST' \
+            '${{ secrets.DOKPLOY_URL }}/api/application.deploy' \
+            -H 'accept: application/json' \
+            -H 'x-api-key: ${{ secrets.DOKPLOY_API_KEY }}' \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "applicationId": "${{ secrets.DOKPLOY_APP_ID }}"
+            }'

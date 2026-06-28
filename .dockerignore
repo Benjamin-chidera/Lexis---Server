@@ -2,4 +2,11 @@ fly.toml
 .git/
 __pycache__/
 .envrc
+.env
 .venv/
+chroma_db/
+test/
+scratch/
+.pytest_cache/
+*.pyc
+.github/
