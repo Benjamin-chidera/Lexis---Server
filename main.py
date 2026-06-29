@@ -295,6 +295,13 @@ async def chat_message(sid, data):
     if not case_id or not content:
         return
 
+    user_id = socket_sessions.get(sid)
+    with Session(engine) as session:
+        case = session.get(Case, case_id)
+        if not case or case.user_id != user_id:
+            print(f"[socket] Unauthorized chat attempt on case {case_id} by user {user_id}")
+            return
+
     print(f"[socket] chat_message for case {case_id} from {sid}: {content[:60]}")
     asyncio.create_task(process_chat_message(case_id, content, sio, sid))
 
@@ -312,6 +319,15 @@ async def start_call_session(sid, data):
             "message": "No case_id provided.",
         }, to=sid)
         return
+
+    with Session(engine) as session:
+        case = session.get(Case, case_id)
+        if not case or case.user_id != user_id:
+            print(f"[socket] Unauthorized call attempt on case {case_id} by user {user_id}")
+            await sio.emit("call_error", {
+                "message": "Unauthorized access to this case.",
+            }, to=sid)
+            return
 
     # Clean up any active sessions for this client first
     if sid in active_call_sessions:

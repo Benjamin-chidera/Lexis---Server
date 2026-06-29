@@ -28,7 +28,16 @@ def client_fixture(session: Session):
     def get_session_override():
         return session
 
+    from auth import get_current_user
+    def get_current_user_override():
+        return {
+            "user_id": 1,
+            "role": "employee",
+            "token": "mock-token"
+        }
+
     fastapi_app.dependency_overrides[get_session] = get_session_override
+    fastapi_app.dependency_overrides[get_current_user] = get_current_user_override
     client = TestClient(fastapi_app)
     yield client
     fastapi_app.dependency_overrides.clear()
@@ -50,7 +59,8 @@ class TestCases:
             context="This is a very long context string that should be truncated because it exceeds the 40 character limit.",
             urls_json=json.dumps(["https://example.com"]),
             pdf_paths_json=json.dumps(["document.pdf"]),
-            image_paths_json=json.dumps(["photo.jpg"])
+            image_paths_json=json.dumps(["photo.jpg"]),
+            user_id=1
         )
         session.add(case)
         session.commit()
@@ -77,7 +87,7 @@ class TestCases:
         assert vault[2]["name"] == "photo.jpg"
 
     def test_list_cases_can_resolve_true(self, client: TestClient, session: Session):
-        case = Case(status="pending")
+        case = Case(status="pending", user_id=1)
         session.add(case)
         session.commit()
 
@@ -98,7 +108,7 @@ class TestCases:
         assert data[0]["canResolve"] is True
 
     def test_list_cases_can_resolve_false(self, client: TestClient, session: Session):
-        case = Case(status="pending")
+        case = Case(status="pending", user_id=1)
         session.add(case)
         session.commit()
 
@@ -125,7 +135,8 @@ class TestCases:
     def test_reindex_case_success(self, client: TestClient, session: Session):
         case = Case(
             urls_json=json.dumps(["http://test.com"]),
-            pdf_paths_json=json.dumps(["test.pdf"])
+            pdf_paths_json=json.dumps(["test.pdf"]),
+            user_id=1
         )
         session.add(case)
         session.commit()
@@ -136,7 +147,7 @@ class TestCases:
         assert response.json()["urls"] == 1
 
     def test_reindex_case_no_files(self, client: TestClient, session: Session):
-        case = Case()
+        case = Case(user_id=1)
         session.add(case)
         session.commit()
 
@@ -157,7 +168,7 @@ class TestCases:
             pass
         monkeypatch.setattr("ai.background.enqueue_research", mock_enqueue)
 
-        case = Case(status="complete")
+        case = Case(status="complete", user_id=1)
         session.add(case)
         session.commit()
 
@@ -180,7 +191,7 @@ class TestCases:
             pass
         monkeypatch.setattr("ai.background.enqueue_research", mock_enqueue)
 
-        case = Case(context="Old context", status="complete")
+        case = Case(context="Old context", status="complete", user_id=1)
         session.add(case)
         session.commit()
 
@@ -199,7 +210,7 @@ class TestCases:
     # PATCH /api/cases/{case_id}/status
     # ---------------------------------------------------------
     def test_update_case_status_success(self, client: TestClient, session: Session):
-        case = Case(case_result_status="pending")
+        case = Case(case_result_status="pending", user_id=1)
         session.add(case)
         session.commit()
 
@@ -225,7 +236,7 @@ class TestCases:
         assert case.case_result_reason == "Resolved"
 
     def test_update_case_status_unauthorized_no_alert(self, client: TestClient, session: Session):
-        case = Case(case_result_status="pending")
+        case = Case(case_result_status="pending", user_id=1)
         session.add(case)
         session.commit()
 

@@ -20,6 +20,7 @@ from sqlmodel import Session
 from database import get_session
 from models import Case
 from cloudinary_client import upload_pdf, upload_image
+from auth import get_current_user
 
 # Image file extensions we accept
 ALLOWED_IMAGE_TYPES = {
@@ -71,6 +72,7 @@ async def upload_pdfs(
     files: List[UploadFile] = File(...),
     case_id: Optional[int] = Form(default=None),
     session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Accepts one or more PDF files from the client.
@@ -97,6 +99,11 @@ async def upload_pdfs(
 
         if case_id is not None:
             case = session.get(Case, case_id)
+            if not case or case.user_id != current_user["user_id"]:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Unauthorized access to this case.",
+                )
             if case:
                 pdfs_raw = getattr(case, 'pdf_paths_json', '[]') or '[]'
                 current_pdfs = json.loads(pdfs_raw)
@@ -121,6 +128,7 @@ async def upload_images(
     files: List[UploadFile] = File(...),
     case_id: Optional[int] = Form(default=None),
     session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Accepts one or more image files from the client.
@@ -147,6 +155,11 @@ async def upload_images(
 
         if case_id is not None:
             case = session.get(Case, case_id)
+            if not case or case.user_id != current_user["user_id"]:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Unauthorized access to this case.",
+                )
             if case:
                 imgs_raw = getattr(case, 'image_paths_json', '[]') or '[]'
                 current_images = json.loads(imgs_raw)

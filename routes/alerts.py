@@ -1,17 +1,24 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from sqlmodel import Session, select
+from sqlmodel import Session, select, or_
 from database import get_session
 from models import Alert, Case
+from auth import get_current_user
 
 router = APIRouter(prefix="/api", tags=["alerts"])
 
 
 @router.get("/alerts")
-def get_alerts(session: Session = Depends(get_session)):
-    """Returns all alerts ordered newest first, with the parent case name."""
+def get_alerts(
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user)
+):
+    """Returns all alerts owned by the current user ordered newest first, with the parent case name."""
     alerts = session.exec(
-        select(Alert).order_by(Alert.created_at.desc())
+        select(Alert)
+        .outerjoin(Case, Alert.case_id == Case.id)
+        .where(or_(Case.user_id == current_user["user_id"], Alert.case_id == None))
+        .order_by(Alert.created_at.desc())
     ).all()
 
     # Build a lookup of case_id → case name so we can label each alert
@@ -46,11 +53,21 @@ def get_alerts(session: Session = Depends(get_session)):
 
 
 @router.patch("/alerts/{alert_id}/read")
-def mark_alert_read(alert_id: int, session: Session = Depends(get_session)):
+def mark_alert_read(
+    alert_id: int, 
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user)
+):
     """Marks a single alert as read."""
     alert = session.get(Alert, alert_id)
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
+    
+    if alert.case_id:
+        case = session.get(Case, alert.case_id)
+        if not case or case.user_id != current_user["user_id"]:
+            raise HTTPException(status_code=403, detail="Unauthorized access to this alert.")
+
     alert.status = "read"
     session.add(alert)
     session.commit()
@@ -59,7 +76,11 @@ def mark_alert_read(alert_id: int, session: Session = Depends(get_session)):
 
 
 @router.patch("/alerts/{alert_id}/accept")
-def accept_alert(alert_id: int, session: Session = Depends(get_session)):
+def accept_alert(
+    alert_id: int, 
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user)
+):
     """
     Marks a research alert as accepted by the attorney.
     The accept/reject buttons will no longer be shown for this alert.
@@ -67,6 +88,11 @@ def accept_alert(alert_id: int, session: Session = Depends(get_session)):
     alert = session.get(Alert, alert_id)
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
+
+    if alert.case_id:
+        case = session.get(Case, alert.case_id)
+        if not case or case.user_id != current_user["user_id"]:
+            raise HTTPException(status_code=403, detail="Unauthorized access to this alert.")
 
     alert.review_status = "accepted"
     session.add(alert)
@@ -80,7 +106,12 @@ class RejectAlertRequest(BaseModel):
 
 
 @router.patch("/alerts/{alert_id}/reject")
-def reject_alert(alert_id: int, req: RejectAlertRequest, session: Session = Depends(get_session)):
+def reject_alert(
+    alert_id: int, 
+    req: RejectAlertRequest, 
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user)
+):
     """
     Rejects a research alert: stores the reason, archives the alert,
     appends the feedback to the case context, and re-queues research
@@ -89,6 +120,11 @@ def reject_alert(alert_id: int, req: RejectAlertRequest, session: Session = Depe
     alert = session.get(Alert, alert_id)
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
+
+    if alert.case_id:
+        case = session.get(Case, alert.case_id)
+        if not case or case.user_id != current_user["user_id"]:
+            raise HTTPException(status_code=403, detail="Unauthorized access to this alert.")
 
     # Persist the rejection decision
     alert.review_status = "rejected"

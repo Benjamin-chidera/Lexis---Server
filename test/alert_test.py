@@ -27,7 +27,16 @@ def client_fixture(session: Session):
     def get_session_override():
         return session
 
+    from auth import get_current_user
+    def get_current_user_override():
+        return {
+            "user_id": 1,
+            "role": "employee",
+            "token": "mock-token"
+        }
+
     fastapi_app.dependency_overrides[get_session] = get_session_override
+    fastapi_app.dependency_overrides[get_current_user] = get_current_user_override
     client = TestClient(fastapi_app)
     yield client
     fastapi_app.dependency_overrides.clear()
@@ -39,7 +48,7 @@ class TestAlerts:
     # ---------------------------------------------------------
     def test_get_alerts_list(self, client: TestClient, session: Session):
         # Create a mock Case and an Alert linked to it
-        case = Case(context="This is a test case with details about contract law.")
+        case = Case(context="This is a test case with details about contract law.", user_id=1)
         session.add(case)
         session.commit()
 
@@ -119,7 +128,7 @@ class TestAlerts:
         monkeypatch.setattr("ai.background.enqueue_research", mock_enqueue)
 
         # Create case and alert to reject
-        case = Case(context="Original context", status="complete")
+        case = Case(context="Original context", status="complete", user_id=1)
         session.add(case)
         session.commit()
 

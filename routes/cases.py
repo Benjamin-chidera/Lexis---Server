@@ -7,13 +7,19 @@ from database import get_session
 from models import Case, Alert
 from ai.vector_store import ingest_pdf_into_vector_store, ingest_url_into_vector_store
 from ai.summarizer import generate_url_summary
+from auth import get_current_user
 
 router = APIRouter(tags=["cases"])
 
 
 @router.get("/api/cases")
-def get_cases(session: Session = Depends(get_session)):
-    cases = session.exec(select(Case)).all()
+def get_cases(
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user)
+):
+    cases = session.exec(
+        select(Case).where(Case.user_id == current_user["user_id"])
+    ).all()
 
     result = []
     for c in cases:
@@ -107,7 +113,12 @@ def get_cases(session: Session = Depends(get_session)):
 
 
 @router.post("/api/cases/{case_id}/reindex")
-def reindex_case(case_id: int, background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
+def reindex_case(
+    case_id: int, 
+    background_tasks: BackgroundTasks, 
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user)
+):
     """
     Re-ingests all PDFs and URLs for an existing case into the vector store.
 
@@ -117,7 +128,7 @@ def reindex_case(case_id: int, background_tasks: BackgroundTasks, session: Sessi
     Example: POST /api/cases/1/reindex
     """
     case = session.get(Case, case_id)
-    if not case:
+    if not case or case.user_id != current_user["user_id"]:
         raise HTTPException(status_code=404, detail=f"Case {case_id} not found")
 
     pdfs_raw = getattr(case, 'pdf_paths_json', '[]') or '[]'
@@ -148,13 +159,19 @@ class AddURLRequest(BaseModel):
     url: str
 
 @router.post("/api/cases/{case_id}/add-url")
-def add_url_to_case(case_id: int, req: AddURLRequest, background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
+def add_url_to_case(
+    case_id: int, 
+    req: AddURLRequest, 
+    background_tasks: BackgroundTasks, 
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user)
+):
     """
     Adds a new URL to an existing case, triggers background ingestion,
     and re-queues background research so the agent uses the new content.
     """
     case = session.get(Case, case_id)
-    if not case:
+    if not case or case.user_id != current_user["user_id"]:
         raise HTTPException(status_code=404, detail=f"Case {case_id} not found")
 
     urls_raw = getattr(case, 'urls_json', '[]') or '[]'
@@ -177,13 +194,18 @@ class AddContextRequest(BaseModel):
     context: str
 
 @router.post("/api/cases/{case_id}/add-context")
-def add_context_to_case(case_id: int, req: AddContextRequest, session: Session = Depends(get_session)):
+def add_context_to_case(
+    case_id: int, 
+    req: AddContextRequest, 
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user)
+):
     """
     Appends additional context notes to an existing case and re-queues
     background research so the agent uses the updated context.
     """
     case = session.get(Case, case_id)
-    if not case:
+    if not case or case.user_id != current_user["user_id"]:
         raise HTTPException(status_code=404, detail=f"Case {case_id} not found")
 
     existing = case.context or ""
@@ -203,14 +225,19 @@ class UpdateCaseStatusRequest(BaseModel):
     case_result_reason: str = ""
 
 @router.patch("/api/cases/{case_id}/status")
-def update_case_status(case_id: int, req: UpdateCaseStatusRequest, session: Session = Depends(get_session)):
+def update_case_status(
+    case_id: int, 
+    req: UpdateCaseStatusRequest, 
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user)
+):
     """
     Updates the status and result reason for a specific case.
     Only allowed when at least one alert for the case has been accepted.
     """
 
     case = session.get(Case, case_id)
-    if not case:
+    if not case or case.user_id != current_user["user_id"]:
         raise HTTPException(status_code=404, detail=f"Case {case_id} not found")
 
     # Check if there is at least one accepted alert for this case
@@ -233,7 +260,11 @@ def update_case_status(case_id: int, req: UpdateCaseStatusRequest, session: Sess
 
 
 @router.post("/api/cases/{case_id}/retry-research")
-def retry_research(case_id: int, session: Session = Depends(get_session)):
+def retry_research(
+    case_id: int, 
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user)
+):
     """
     Retries failed background research for a case.
 
@@ -241,7 +272,7 @@ def retry_research(case_id: int, session: Session = Depends(get_session)):
     the research job onto the RQ queue.
     """
     case = session.get(Case, case_id)
-    if not case:
+    if not case or case.user_id != current_user["user_id"]:
         raise HTTPException(status_code=404, detail=f"Case {case_id} not found")
 
     if case.status not in ("failed", "complete"):

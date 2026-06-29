@@ -1,18 +1,26 @@
 import json
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 from database import get_session
-from models import CaseMessage
+from models import CaseMessage, Case
+from auth import get_current_user
 
 router = APIRouter(prefix="/api", tags=["messages"])
 
 
 @router.get("/cases/{case_id}/messages")
-def get_case_messages(case_id: int, session: Session = Depends(get_session)):
+def get_case_messages(
+    case_id: int, 
+    session: Session = Depends(get_session),
+    current_user: dict = Depends(get_current_user)
+):
     """
     Returns all chat messages for a case, ordered oldest first.
     Called when the user opens a case modal to restore conversation history.
     """
+    case = session.get(Case, case_id)
+    if not case or case.user_id != current_user["user_id"]:
+        raise HTTPException(status_code=404, detail="Case not found")
     messages = session.exec(
         select(CaseMessage)
         .where(CaseMessage.case_id == case_id)
