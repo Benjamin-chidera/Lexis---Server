@@ -39,3 +39,4 @@ try:
     
 except Exception as e:
     print("Pinecone verification failed:", e)
+ 
