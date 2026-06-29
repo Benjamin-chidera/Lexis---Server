@@ -1,25 +1,23 @@
 """
 vector_store.py
 
-Manages a per-case Chroma vector store using LangChain's Chroma integration.
-Every case gets its own isolated collection named "case_{case_id}".
-Documents are split into chunks and embedded using the nomic-embed-text model.
+Manages a per-case Pinecone vector store using LangChain's Pinecone integration.
+Every case gets its own isolated namespace named "case_{case_id}" inside the
+"lexis-vector" index. Documents are embedded using the nvidia/llama-nemotron-embed-1b-v2 model.
 """
 
 import os
 import json
 import requests as http_requests
-
-# Disable ChromaDB anonymous telemetry
-os.environ["ANONYMOUS_TELEMETRY"] = "False"
+from pinecone import Pinecone, ServerlessSpec
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
+from langchain_pinecone import PineconeVectorStore
 from .model_providers import get_embeddings
 from .image_handler import describe_image
 
-# Where Chroma will store its data on disk
-CHROMA_PERSIST_DIR = os.path.join(os.path.dirname(__file__), "..", "chroma_db")
+# Pinecone Index name
+PINECONE_INDEX_NAME = "lexis-vector"
 
 # Text chunking settings
 CHUNK_SIZE = 800
@@ -27,21 +25,45 @@ CHUNK_OVERLAP = 150
 
 
 def get_collection_name(case_id: int) -> str:
-    """Each case gets its own isolated Chroma collection."""
+    """Each case gets its own isolated Pinecone namespace."""
     return f"case_{case_id}"
 
 
-def get_vector_store(case_id: int) -> Chroma:
+def get_vector_store(case_id: int) -> PineconeVectorStore:
     """
-    Initializes/loads a persistent Chroma vector store for a specific case.
-    Uses the embeddings from get_embeddings().
+    Initializes/loads the Pinecone vector store for a specific case.
+    Uses namespaces for case-level data isolation.
     """
     embeddings = get_embeddings()
-    collection_name = get_collection_name(case_id)
-    return Chroma(
-        persist_directory=CHROMA_PERSIST_DIR,
-        embedding_function=embeddings,
-        collection_name=collection_name,
+    api_key = os.getenv("PINECONE_API_KEY")
+    if not api_key:
+        raise ValueError("PINECONE_API_KEY environment variable is not set")
+
+    pc = Pinecone(api_key=api_key)
+
+    # Auto-create the index if it doesn't exist
+    existing_indexes = [idx.name for idx in pc.list_indexes()]
+    if PINECONE_INDEX_NAME not in existing_indexes:
+        print(f"[vector_store] Creating Pinecone index '{PINECONE_INDEX_NAME}' with dimension 2048...")
+        try:
+            pc.create_index(
+                name=PINECONE_INDEX_NAME,
+                dimension=2048,
+                metric="cosine",
+                spec=ServerlessSpec(
+                    cloud="aws",
+                    region="us-east-1"
+                )
+            )
+        except Exception as e:
+            print(f"[vector_store] Error creating index (could be creating in background): {e}")
+
+    namespace = get_collection_name(case_id)
+    return PineconeVectorStore(
+        index_name=PINECONE_INDEX_NAME,
+        embedding=embeddings,
+        namespace=namespace,
+        pinecone_api_key=api_key
     )
 
 
@@ -133,7 +155,7 @@ def ingest_url_into_vector_store(case_id: int, url: str) -> int:
 
 def ingest_image_into_vector_store(case_id: int, image_path: str) -> int:
     """
-    Uses Mistral Vision API to generate an image description,
+    Uses Nvidia Vision API to generate an image description,
     chunks it, and adds it to the case's vector store.
     """
     filename = os.path.basename(image_path)

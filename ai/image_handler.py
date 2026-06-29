@@ -1,29 +1,23 @@
 """
 image_handler.py
 
-Sends an image to the Ollama granite3.2-vision:latest multimodal model and returns a plain-text
+Sends an image to the Nvidia Vision model (llama-3.1-nemotron-nano-vl-8b-v1) and returns a plain-text
 description. This description is then stored in the vector DB so the AI can
 answer questions about image content (e.g. court diagrams, scanned exhibits).
-
-Ollama must be running with the granite3.2-vision:latest model loaded:
-  ollama run granite3.2-vision:latest
 """
 
 import base64
 import os
 import requests
-from .model_providers import OLLAMA_BASE_URL, MODEL
-
-# The Ollama REST endpoint for chat completions
-OLLAMA_API_URL = f"{OLLAMA_BASE_URL}/api/chat"
+from langchain_nvidia_ai_endpoints import ChatNVIDIA
 
 # Model to use for image understanding
-VISION_MODEL = MODEL
+VISION_MODEL = "nvidia/llama-3.1-nemotron-nano-vl-8b-v1"
 
 
 def describe_image(image_path: str) -> str:
     """
-    Reads an image from disk, sends it to the granite3.2-vision:latest model via Ollama,
+    Reads an image from disk or remote URL, sends it to the Nvidia vision model,
     and returns a plain English description of what the image contains.
 
     Returns an error string if the file is missing or the model call fails.
@@ -43,36 +37,34 @@ def describe_image(image_path: str) -> str:
 
     image_base64 = base64.b64encode(image_bytes).decode("utf-8")
 
+    api_key = os.getenv("NVIDIA_API_KEY")
+    if not api_key:
+        return "[Error: NVIDIA_API_KEY environment variable is not set]"
+
     prompt = (
         "You are a legal document analyst. Describe everything visible in this image "
         "in detail. If it contains text, transcribe it exactly. If it contains a chart, "
         "table, diagram, or photograph, describe what it shows. Be thorough."
     )
 
-    # Build the request payload for Ollama's chat API
-    request_body = {
-        "model": VISION_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt,
-                "images": [image_base64],
-            }
-        ],
-        "stream": False,
-    }
-
     try:
-        response = requests.post(OLLAMA_API_URL, json=request_body, timeout=120)
-        response.raise_for_status()
+        llm = ChatNVIDIA(
+            model=VISION_MODEL,
+            nvidia_api_key=api_key
+        )
 
-        data = response.json()
-        description = data["message"]["content"]
-
-        return description.strip()
-
-    except requests.exceptions.ConnectionError:
-        return "[Error: Could not connect to Ollama. Is it running? Run: ollama run llava]"
+        response = llm.invoke(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
+                    ],
+                }
+            ]
+        )
+        return response.content.strip()
 
     except Exception as error:
         return f"[Error describing image: {str(error)}]"

@@ -17,6 +17,10 @@ from dotenv import load_dotenv
 
 load_dotenv() 
 
+# Map NVIDIA_API_KEY to NVIDIA_NIM_API_KEY so LiteLLM/CrewAI can authenticate correctly
+if os.getenv("NVIDIA_API_KEY") and not os.getenv("NVIDIA_NIM_API_KEY"):
+    os.environ["NVIDIA_NIM_API_KEY"] = os.getenv("NVIDIA_API_KEY")
+
 # --- MODEL CONFIGURATION ---
 
 # 1. Main Chat Model (Used for Analyst, Strategist, Summarizer)
