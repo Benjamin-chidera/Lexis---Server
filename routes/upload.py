@@ -33,7 +33,7 @@ ALLOWED_IMAGE_TYPES = {
 router = APIRouter(prefix="/api", tags=["upload"])
 
 
-def ingest_pdf_in_background(case_id: int, file_url: str):
+def ingest_pdf_in_background(case_id: int, file_url: str, file_bytes: bytes = None):
     """
     Called in a background thread after a PDF is uploaded to Cloudinary.
     Ingests the PDF into the case's Chroma vector store.
@@ -43,7 +43,7 @@ def ingest_pdf_in_background(case_id: int, file_url: str):
 
     try:
         from ai.vector_store import ingest_pdf_into_vector_store
-        chunk_count = ingest_pdf_into_vector_store(case_id, file_url)
+        chunk_count = ingest_pdf_into_vector_store(case_id, file_url, file_bytes)
         print(f"[upload] PDF ingested for case {case_id}: {chunk_count} chunks")
     except Exception as error:
         print(f"[upload] PDF ingestion failed for case {case_id}: {str(error)}")
@@ -106,7 +106,7 @@ async def upload_pdfs(
                 session.add(case)
                 session.commit()
 
-            background_tasks.add_task(ingest_pdf_in_background, case_id, file_url)
+            background_tasks.add_task(ingest_pdf_in_background, case_id, file_url, file_bytes)
 
     if case_id is not None and saved_paths:
         from ai.background import enqueue_research
