@@ -1,3 +1,12 @@
+# --- Mistral SDK import patch for older/newer library compatibility ---
+try:
+    import sys
+    import mistralai
+    from mistralai.client import Mistral
+    setattr(sys.modules['mistralai'], 'Mistral', Mistral)
+except Exception:
+    pass
+
 from pydantic import BaseModel, Field, field_validator
 from typing import List
 from crewai import Agent, Task, Crew, Process
@@ -645,6 +654,110 @@ def _normalize_to_research_output(parsed: dict) -> "ResearchOutput | None":
         return None
 
 
+def is_url_working(url: str) -> bool:
+    import urllib.request
+    import urllib.error
+    from urllib.parse import urlparse
+    
+    url = url.strip().strip('()[]')
+    parsed = urlparse(url)
+    if not parsed.scheme or parsed.scheme not in ('http', 'https'):
+        return False
+        
+    # Helper to check with a specific method
+    def check_method(method: str) -> tuple[bool, int | None]:
+        try:
+            req = urllib.request.Request(
+                url, 
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+            )
+            req.get_method = lambda: method
+            with urllib.request.urlopen(req, timeout=2.0) as response:
+                return (response.status < 400, response.status)
+        except urllib.error.HTTPError as e:
+            return (False, e.code)
+        except Exception:
+            return (False, None)
+            
+    # Try HEAD first
+    success, code = check_method("HEAD")
+    if success:
+        return True
+    if code in (401, 403):
+        return True
+        
+    # If code is 405 (Method Not Allowed) or other non-404, try GET
+    if code is not None and code != 404:
+        success, code = check_method("GET")
+        if success:
+            return True
+        if code in (401, 403):
+            return True
+            
+    return False
+
+
+def verify_urls_in_parallel(urls: list[str]) -> dict[str, bool]:
+    import concurrent.futures
+    
+    unique_urls = list(set(urls))
+    results = {}
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_url = {executor.submit(is_url_working, url): url for url in unique_urls}
+        for future in concurrent.futures.as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                results[url] = future.result()
+            except Exception:
+                results[url] = False
+                
+    return results
+
+
+def search_tavily(query: str) -> list[dict]:
+    import urllib.request
+    import json
+    import os
+    
+    api_key = os.getenv("TAVILY_API_KEY")
+    if not api_key:
+        return []
+        
+    url = "https://api.api.tavily.com/search" if "api.api.tavily.com" in os.getenv("TAVILY_API_URL", "") else "https://api.tavily.com/search"
+    payload = {
+        "api_key": api_key,
+        "query": query,
+        "max_results": 3,
+        "search_depth": "advanced"
+    }
+    
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=5.0) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            return data.get("results", [])
+    except Exception as e:
+        print(f"[crew] Tavily raw search failed for query '{query}': {e}")
+        return []
+
+
+def find_working_alternative_url(title: str) -> str | None:
+    print(f"[crew] Searching alternative working URL for: '{title}'...")
+    results = search_tavily(title)
+    for res in results:
+        url = res.get("url")
+        if url and url.startswith("http"):
+            if is_url_working(url):
+                print(f"[crew] Found working alternative URL: {url}")
+                return url
+    return None
+
+
 def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
     """
     Runs a background research crew that conducts adversarial legal research,
@@ -721,49 +834,20 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
         except Exception:
             pass
 
-    researcher = Agent(
-        role="Lexis Adversarial Legal Research Agent",
+    evidence_hunter = Agent(
+        role="Lexis Forensic Legal Evidence Hunter",
         goal=(
-            "Synthesize internal client evidence (VAULT EVIDENCE) with public legal precedents "
-            "to build an aggressive, highly accurate, and actionable legal memo for a Managing Partner. "
-            "Focus on hard timelines, physical evidence (e.g., missing hazard signs from photos), "
-            "and contradictions found in the vault evidence. The 'smoking guns' are in the vault. "
-            "After generating the Liability Summary and Evidence Log, you MUST perform a Tactical "
-            "Leverage Analysis identifying the settlement trigger, barriers to defense, and the "
-            "next tactical move."
+            "Search public legal precedents, regulatory filings, and internal client evidence (VAULT EVIDENCE) "
+            "to gather all relevant legal citations, fines, and liabilities related to the case."
         ),
         backstory=(
-            "You are an elite Senior Civil Litigation Strategist and Forensic Evidence Auditor. "
-            "Your objective is to synthesize internal client evidence with public legal precedents "
-            "to build an aggressive, highly accurate, and actionable legal memo.\n\n"
-
+            "You are an elite forensic legal evidence hunter. You excel at searching online databases, "
+            "dockets, BAILII, and news archives to extract hard facts, dates, and litigation precedents.\n\n"
             "EVIDENCE SYNTHESIS PROTOCOL:\n"
-            "You must read the VAULT EVIDENCE and connect it directly to the CASE CONTEXT. "
-            "Look for hard timelines, physical evidence (e.g., missing hazard signs from photos), "
-            "and contradictions. Do not rely solely on the case context; the 'smoking guns' are "
-            "in the vault evidence.\n\n"
-
+            "Read the VAULT EVIDENCE and connect it directly to the CASE CONTEXT. Look for timelines, "
+            "physical evidence, and contradictions. The smoking guns are in the vault.\n\n"
             "ZERO HALLUCINATION PROTOCOL:\n"
-            "You are strictly prohibited from inventing case law, citations, or URLs. "
-            "If you cannot verify a specific case name, year, and court using your research "
-            "capabilities, do not include it. An uncited fact is better than a fabricated citation.\n\n"
-
-            "CIVIL LAW STRICT COMPLIANCE:\n"
-            "This is civil litigation. You must apply the 'balance of probabilities' standard. "
-            "Do not cite Criminal Court cases (e.g., citations containing 'Crim' or 'R v.') as "
-            "civil precedents.\n\n"
-
-            "CRIMINAL LEVERAGE EXCEPTION:\n"
-            "You may cite criminal statutes (e.g., Computer Misuse Act, Fraud Act) ONLY if you "
-            "explicitly separate them under a 'Criminal Leverage' heading, noting that they "
-            "establish grounds for a police report to be used as leverage to accelerate a civil "
-            "settlement.\n\n"
-
-            "CITATION AND URL PROTOCOL:\n"
-            "- You are NOT allowed to guess or fabricate URLs.\n"
-            "- If you cite a case, use the correct BAILII citation format (e.g., [2022] CSIH 45).\n"
-            "- If you do not have the live URL returned by your search tool, write "
-            "'URL: Available upon request from court records' instead of inventing a broken link."
+            "Never invent case law, citations, or URLs. If a citation cannot be verified, do not include it."
         ),
         llm=llm,
         tools=search_tools,
@@ -771,56 +855,62 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
         max_iter=5,
     )
 
-    research_task = Task(
+    legal_strategist = Agent(
+        role="Lexis Senior Civil Litigation Strategist",
+        goal=(
+            "Synthesize gathered legal evidence and internal context into a highly structured, "
+            "strategic legal memo for the Managing Partner."
+        ),
+        backstory=(
+            "You are an expert civil litigation strategist and Senior Partner. You take raw evidence, "
+            "identify key liability vulnerabilities, analyze defense arguments, determine settlement triggers, "
+            "and format all information into the required schema."
+        ),
+        llm=llm,
+        tools=[],  # Strictly NO tools to prevent parser conflicts with output_pydantic
+        verbose=True,
+        max_iter=3,
+    )
+
+    evidence_gathering_task = Task(
         description=(
-            "SYSTEM ROLE: You are an elite Senior Civil Litigation Strategist and Forensic Evidence Auditor.\n\n"
-
+            "SYSTEM ROLE: You are an elite Forensic Legal Evidence Hunter.\n\n"
             f"CASE CONTEXT (original attorney notes — DO NOT modify):\n{case_context[:800]}\n\n"
-
             f"VAULT EVIDENCE (extracted text from uploaded PDFs, OCR descriptions of images, "
             f"and scraped URLs — treat as absolute verified fact):\n{vault_evidence[:3000]}\n\n"
-
-            f"{rejection_block}"
-
+            f"{rejection_block}\n\n"
             "CORE DIRECTIVES:\n\n"
-
             "1. EVIDENCE SYNTHESIS: Read the VAULT EVIDENCE and connect it directly to the CASE CONTEXT. "
-            "Look for hard timelines, physical evidence, and contradictions. The 'smoking guns' are in "
-            "the vault evidence, not just the case context.\n\n"
-
+            "Look for hard timelines, physical evidence, and contradictions.\n\n"
             "2. ZERO HALLUCINATION: You are strictly prohibited from inventing case law, citations, or URLs. "
             "If you cannot verify a specific case name, year, and court, do not include it.\n\n"
-
             "3. CIVIL LAW COMPLIANCE: Apply 'balance of probabilities'. Do NOT cite Criminal Court cases "
             "(e.g., 'Crim', 'R v.') as civil precedents.\n\n"
-
             "4. CRIMINAL LEVERAGE EXCEPTION: You may cite criminal statutes ONLY under a separate "
             "'CRIMINAL LEVERAGE OPPORTUNITIES' heading, noting they establish grounds for a police "
             "report to accelerate a civil settlement.\n\n"
-
             "5. Use your Tavily Web Search tool to locate real legal findings.\n\n"
+            "Provide a comprehensive, detailed report listing all findings, case law, statutes, and their corresponding URLs or source details."
+        ),
+        expected_output="A detailed, unstructured report listing all legal precedents, regulatory fines, findings, and their source URLs.",
+        agent=evidence_hunter,
+    )
 
-            "RELEVANCE FILTERS:\n"
-            "- DROP: historical patents, physical science, entertainment, abstract definitions.\n"
-            "- KEEP: active/pending lawsuits, regulatory enforcement, material corporate liabilities, "
-            "data breach incidents, community organising for legal recourse.\n\n"
-
-            "TACTICAL LEVERAGE ANALYSIS (REQUIRED):\n"
-            "After the Liability Summary and Evidence Log, answer:\n"
-            "1. SETTLEMENT TRIGGER: The single most powerful fact creating maximum settlement pressure.\n"
-            "2. BARRIERS TO DEFENSE: The opponent's most likely defense and the direct counter-argument.\n"
-            "3. NEXT TACTICAL MOVE: The exact recommended next step to force a win.\n\n"
-
-            "SELF-REVIEW: Before finalising, review every citation. If it cannot be verified from "
-            "your search results or vault evidence, delete it. An uncited fact is better than a "
-            "fabricated citation.\n\n"
-
-            "CRITICAL CONSTRAINTS:\n"
-            "- Only report real search results and real URLs from Tavily.\n"
-            "- NEVER fabricate lawsuits, court filings, or URLs.\n"
-            "- Use BAILII citation format for cases.\n"
-            "- NO placeholder URLs, truncated links, or '#' links.\n"
-            "- NO disclaimers or meta-talk about simulated research."
+    strategy_generation_task = Task(
+        description=(
+            "SYSTEM ROLE: You are a Senior Civil Litigation Strategist.\n\n"
+            f"CASE CONTEXT:\n{case_context[:800]}\n\n"
+            f"VAULT EVIDENCE:\n{vault_evidence[:3000]}\n\n"
+            "You are provided with the raw RESEARCH FINDINGS from the previous task. Your goal is to structure this into a high-level strategic memo.\n\n"
+            "CORE DIRECTIVES:\n\n"
+            "1. LIABILITY SUMMARY: Provide a detailed, professional summary of actual legal liabilities and insights found (strictly no disclaimers or simulated text).\n\n"
+            "2. EVIDENCE LOG: Convert the research findings into a list of structured evidence items. Each item must have a real title, detailed summary, full complete source URL, and type.\n\n"
+            "3. TACTICAL LEVERAGE ANALYSIS (leverage_strategy):\n"
+            "   - settlement_trigger: The single most powerful fact from the Evidence Log creating maximum settlement pressure.\n"
+            "   - barriers_to_defense: The opponent's most likely defense and the direct counter-argument.\n"
+            "   - next_tactical_move: The exact recommended next step to force a win.\n\n"
+            "4. SOURCE INDEX: A list of all unique source URLs cited in the evidence log.\n\n"
+            "CONSTRAINT: Always prioritize valid JSON/Format output. Do not include conversational filler."
         ),
         expected_output=(
             "A structured JSON object matching the ResearchOutput schema containing:\n"
@@ -829,13 +919,13 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
             "3. leverage_strategy: An object with three fields — settlement_trigger (the single most powerful fact creating settlement pressure), barriers_to_defense (the opponent's likely defense and the direct counter-argument), and next_tactical_move (the exact recommended next step to force a win).\n"
             "4. source_index: A complete list of all unique, real URLs found during the web search."
         ),
-        agent=researcher,
+        agent=legal_strategist,
         output_pydantic=ResearchOutput,
     )
 
     crew = Crew(
-        agents=[researcher],
-        tasks=[research_task],
+        agents=[evidence_hunter, legal_strategist],
+        tasks=[evidence_gathering_task, strategy_generation_task],
         process=Process.sequential,
         verbose=True,
         max_rpm=10,
@@ -890,6 +980,64 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
         if parsed:
             raw_dict = parsed
             output_obj = _normalize_to_research_output(parsed)
+
+    if output_obj:
+        print("[crew] Verifying URLs in parallel...")
+        urls_to_check = []
+        for item in output_obj.evidence_log:
+            url = item.source_url.strip()
+            if url and url.startswith("http"):
+                urls_to_check.append(url)
+        for url in output_obj.source_index:
+            url = url.strip()
+            if url and url.startswith("http"):
+                urls_to_check.append(url)
+                
+        # Run parallel verification
+        verification_results = verify_urls_in_parallel(urls_to_check)
+        
+        repaired_urls = {}
+        
+        # Apply results to evidence_log
+        for item in output_obj.evidence_log:
+            url = item.source_url.strip()
+            if url and url.startswith("http"):
+                is_working = verification_results.get(url, False)
+                if not is_working:
+                    # Let's dynamically find a working replacement URL!
+                    alternative_url = find_working_alternative_url(item.title)
+                    if alternative_url:
+                        print(f"[crew] Successfully repaired broken URL. Replaced '{url}' with '{alternative_url}'")
+                        item.source_url = alternative_url
+                        repaired_urls[url] = alternative_url
+                        verification_results[alternative_url] = True
+                    else:
+                        print(f"[crew] No working alternative URL found for: '{item.title}'. Replacing with placeholder.")
+                        item.source_url = "URL: Available upon request from court records"
+                        
+        # Apply results to source_index
+        verified_index = []
+        for url in output_obj.source_index:
+            url = url.strip()
+            # If this URL was repaired, check the alternative
+            if url in repaired_urls:
+                verified_index.append(repaired_urls[url])
+                continue
+                
+            if url and url.startswith("http"):
+                if verification_results.get(url, False):
+                    verified_index.append(url)
+                else:
+                    print(f"[crew] Removing broken URL from source_index: {url}")
+            else:
+                verified_index.append(url)
+                
+        # Also, make sure any newly added alternative URL is listed in the source_index if not already
+        for alt_url in repaired_urls.values():
+            if alt_url not in verified_index:
+                verified_index.append(alt_url)
+                
+        output_obj.source_index = list(set(verified_index))
 
     # Extract the ai_reasoning before formatting. Use the liability_summary
     # because it's the high-level "why this matters" paragraph — exactly what

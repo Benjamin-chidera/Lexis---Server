@@ -11,6 +11,7 @@ from auth import (
     COOKIE_NAME,
     TOKEN_EXPIRE_DAYS,
     IS_PRODUCTION,
+    COOKIE_DOMAIN,
     hash_password,
     verify_password,
     create_token,
@@ -116,6 +117,7 @@ def make_auth_response(user: User) -> JSONResponse:
         httponly=True,
         secure=IS_PRODUCTION,
         samesite="none" if IS_PRODUCTION else "lax",
+        domain=COOKIE_DOMAIN,
         max_age=TOKEN_EXPIRE_DAYS * 86400,
     )
     return response
@@ -189,7 +191,14 @@ def set_password(req: SetPasswordRequest, session: Session = Depends(get_session
 def logout(current_user: dict = Depends(get_current_user)):
     invalidate_token(current_user["token"])
     response = JSONResponse({"message": "Logged out successfully."})
-    response.delete_cookie(COOKIE_NAME)
+    response.delete_cookie(
+        key=COOKIE_NAME,
+        path="/",
+        domain=COOKIE_DOMAIN,
+        secure=IS_PRODUCTION,
+        httponly=True,
+        samesite="none" if IS_PRODUCTION else "lax",
+    )
     return response
 
 

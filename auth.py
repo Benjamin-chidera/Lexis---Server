@@ -13,6 +13,9 @@ COOKIE_NAME = "access_token"
 # True in production (HTTPS), False for local dev (HTTP)
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development") == "production"
 
+# Scope cookies to the parent domain in production so subdomains share them
+COOKIE_DOMAIN = os.getenv("COOKIE_DOMAIN", ".discoverbenix.com" if IS_PRODUCTION else None)
+
 # Blocklist of tokens that were explicitly logged out.
 # Only used to reject tokens before their JWT expiry after logout.
 revoked_tokens: set[str] = set()
