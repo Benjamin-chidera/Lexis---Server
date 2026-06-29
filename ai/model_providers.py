@@ -33,7 +33,8 @@ if os.getenv("NVIDIA_API_KEY") and not os.getenv("NVIDIA_NIM_API_KEY"):
 # MODEL = "mistral-small-latest"
 # MODEL = "meta/llama-3.1-70b-instruct"
 # MODEL = "deepseek-ai/deepseek-v4-pro"
-MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+# MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+MODEL = "meta/llama-3.1-70b-instruct"
 
 
 # 2. Embedding Model (Used for Vector Store)
