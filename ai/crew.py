@@ -830,6 +830,7 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
             "4. source_index: A complete list of all unique, real URLs found during the web search."
         ),
         agent=researcher,
+        output_pydantic=ResearchOutput,
     )
 
     crew = Crew(
