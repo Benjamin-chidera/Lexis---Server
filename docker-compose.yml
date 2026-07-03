@@ -48,7 +48,6 @@ services:
     container_name: legal-assistant-langfuse
     ports:
       - "3000:3000"
-    env_file: .env
     environment:
       - DATABASE_URL=${LANGFUSE_DB_URL}
       - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:-mysecret} # Fallback to 'mysecret' if not set in .env
