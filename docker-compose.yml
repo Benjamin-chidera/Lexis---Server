@@ -17,6 +17,7 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
       - ENVIRONMENT=development
+      - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse-server:3000}
     depends_on:
       - redis
 
@@ -28,6 +29,7 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
       - ENVIRONMENT=development
+      - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse-server:3000}
     depends_on:
       - redis
 
@@ -40,6 +42,19 @@ services:
       - RQ_DASHBOARD_REDIS_URL=redis://redis:6379
     depends_on:
       - redis
+
+  langfuse-server:
+    image: ghcr.io/langfuse/langfuse:2
+    container_name: legal-assistant-langfuse
+    ports:
+      - "3000:3000"
+    env_file: .env
+    environment:
+      - DATABASE_URL=${LANGFUSE_DB_URL}
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:-mysecret} # Fallback to 'mysecret' if not set in .env
+      - SALT=${SALT:-mysalt} # Fallback to 'mysalt' if not set in .env
+      - NEXTAUTH_URL=${NEXTAUTH_URL} # Replace with your VPS IP or Domain in production
+      - TELEMETRY_ENABLED=false
 
 volumes:
   redis_data:

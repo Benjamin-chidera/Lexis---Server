@@ -57,13 +57,17 @@ def get_chat_model(temperature=0):
     Returns a configured LangChain Chat model instance.
     Standardized across the whole project.
     """
+    from ai.monitoring import get_langfuse_handler
+    handler = get_langfuse_handler()
+    callbacks = [handler] if handler else None
+
     return ChatNVIDIA(
         model=MODEL,
         # api_key=os.getenv("MISTRAL_API_KEY"), 
         #         api_key=os.getenv("OPENAI_API_KEY"), 
         api_key=os.getenv("NVIDIA_API_KEY"),  
-
         temperature=temperature,
+        callbacks=callbacks,
     )
 # def get_chat_model(temperature=0):
 

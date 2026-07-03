@@ -38,6 +38,8 @@ dependencies = [
     "langchain-mistralai>=1.1.4",
     "langchain-nvidia-ai-endpoints>=1.4.1",
     "pytest>=9.0.3",
+    "langfuse==2.57.0",
+    "langchain>=1.2.17",
 ]
 
 [tool.pytest.ini_options]

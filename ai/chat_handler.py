@@ -127,10 +127,13 @@ async def process_chat_message(case_id: int, user_content: str, sio, sid: str) -
         }
 
         # Step 4: Run the LangGraph pipeline in a thread executor
+        from ai.monitoring import get_langfuse_handler
+        langfuse_handler = get_langfuse_handler()
+        config = {"callbacks": [langfuse_handler]} if langfuse_handler else {}
+
         final_state = await loop.run_in_executor(
             None,
-            chat_graph.invoke,
-            initial_state,
+            lambda: chat_graph.invoke(initial_state, config=config),
         )
 
         ai_response_text = final_state.get("response", "")
