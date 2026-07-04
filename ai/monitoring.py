@@ -43,7 +43,9 @@ def get_langfuse_handler():
     host = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
     
     if public_key and secret_key:
-        # Langfuse CallbackHandler automatically picks up LANGFUSE_PUBLIC_KEY,
-        # LANGFUSE_SECRET_KEY, and LANGFUSE_HOST from the environment variables.
-        return CallbackHandler()
+        return CallbackHandler(
+            public_key=public_key,
+            secret_key=secret_key,
+            host=host
+        )
     return None
