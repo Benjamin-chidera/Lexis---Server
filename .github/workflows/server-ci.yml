@@ -3,10 +3,12 @@ name: Server CI & CD
 on:
   push:
     branches:
-      - main
+      # - main
+      - development
   pull_request:
     branches:
       - main
+      # - development
 
 jobs:
   test:
@@ -39,7 +41,7 @@ jobs:
     name: Build & Push Docker Image
     needs: test
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/development'
     env:
       IMAGE_NAME: lexis
 

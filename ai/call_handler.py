@@ -29,7 +29,7 @@ from mistralai.client import Mistral
 from sqlmodel import Session, select
 
 from database import engine
-from models import Case
+from models import Case, CaseMessage
 
 load_dotenv()
 
@@ -117,6 +117,12 @@ class CallSession:
         self.rms_history = []
         self.speech_threshold = 400.0  # Initial default threshold
 
+        # Echo-guard: timestamp when AI audio playback started on the client.
+        # We ignore interruption attempts for a grace period after this to
+        # prevent the AI's own speaker output from triggering a false cut-off.
+        self._speaking_start_time: Optional[float] = None
+        self._interruption_streak = 0  # consecutive high-RMS chunks counter
+
     async def start(self):
         """Load case context and start the audio processing loop."""
         # Load the case context from the database
@@ -173,10 +179,27 @@ class CallSession:
         # Calculate RMS energy of the incoming chunk
         rms = self._calculate_rms(chunk)
 
-        # If AI is speaking and user actually speaks (above dynamic threshold), trigger interruption
-        if self.is_ai_speaking and rms >= self.speech_threshold:
-            print(f"[call] User interrupted AI with active speech (RMS={rms:.1f} >= threshold={self.speech_threshold:.1f})")
-            await self.handle_interruption()
+        # If AI is speaking, check for genuine user interruption
+        if self.is_ai_speaking:
+            # Grace period: ignore the first 1.5s after AI audio starts
+            # to let echo cancellation settle and avoid self-interruption
+            ECHO_GRACE_SECONDS = 1.5
+            elapsed = (asyncio.get_event_loop().time() - self._speaking_start_time
+                       if self._speaking_start_time else 0.0)
+
+            if elapsed > ECHO_GRACE_SECONDS and rms >= self.speech_threshold:
+                self._interruption_streak += 1
+                # Require 3 consecutive loud chunks (~300ms) to confirm
+                # this is real user speech, not a transient echo spike
+                if self._interruption_streak >= 3:
+                    print(f"[call] User interrupted AI (RMS={rms:.1f}, streak={self._interruption_streak})")
+                    self._interruption_streak = 0
+                    await self.handle_interruption()
+            else:
+                self._interruption_streak = 0
+
+            # Do not queue chunks while the AI is speaking to prevent echo from triggering false VAD transcriptions
+            return
 
         await self.audio_queue.put(chunk)
 
@@ -257,8 +280,13 @@ class CallSession:
     def _update_threshold(self, rms: float):
         """
         Dynamically updates the ambient noise floor and speech threshold.
-        Uses a rolling history of recent RMS values to estimate current background noise.
+        Only adds to history if the RMS is below an absolute max threshold,
+        preventing speech from inflating the ambient noise estimate.
         """
+        # If the chunk is loud (likely speech), do not add it to ambient noise floor
+        if rms >= 300.0:
+            return
+
         self.rms_history.append(rms)
         # Keep only the last 30 chunks (~3 seconds of ambient audio)
         if len(self.rms_history) > 30:
@@ -273,14 +301,12 @@ class CallSession:
         else:
             noise_floor = 100.0
 
-        # Cap the noise floor at a safe maximum (e.g. 250.0) to prevent the user's
-        # own initial speech from inflating the threshold and locking them out.
-        noise_floor = min(250.0, noise_floor)
+        # Cap the noise floor at a safe maximum to prevent user speech from locking them out
+        noise_floor = min(200.0, noise_floor)
 
         # Dynamically calculate the speech threshold:
-        # We want it to be at least 300.0 to prevent false triggers in extremely quiet rooms,
-        # and at least noise_floor + 200.0 to handle loud ambient background noise.
-        self.speech_threshold = max(300.0, noise_floor + 200.0)
+        # Cap at 400.0 so quiet/normal speech is always detected and never locked out
+        self.speech_threshold = min(400.0, max(250.0, noise_floor + 150.0))
 
     async def _collect_audio_window(self) -> Optional[bytes]:
         """
@@ -319,8 +345,10 @@ class CallSession:
         # Step 2: Keep collecting chunks until silence gap (using the FROZEN speech threshold)
         silence_elapsed = 0.0
         frozen_threshold = self.speech_threshold
+        max_duration = 15.0  # safety cap: max 15 seconds of audio per utterance
+        duration_elapsed = 0.0
 
-        while silence_elapsed < silence_timeout and self.is_active:
+        while silence_elapsed < silence_timeout and duration_elapsed < max_duration and self.is_active:
             try:
                 chunk = await asyncio.wait_for(
                     self.audio_queue.get(),
@@ -334,8 +362,11 @@ class CallSession:
                     silence_elapsed = 0.0
                 else:
                     silence_elapsed += chunk_timeout
+                
+                duration_elapsed += chunk_timeout
             except asyncio.TimeoutError:
                 silence_elapsed += chunk_timeout
+                duration_elapsed += chunk_timeout
             except asyncio.CancelledError:
                 return None
 
@@ -455,10 +486,52 @@ class CallSession:
                 "text": ai_text,
             }, to=self.sid)
 
+            # Persist both user and AI messages to the DB so they appear
+            # in the Intelligence Stream chat panel after the call ends
+            user_msg_id = await self._save_voice_message_to_chat("user", user_text)
+            ai_msg_id = await self._save_voice_message_to_chat("ai", ai_text)
+
+            timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            # Emit the user's voice transcript to the chat panel
+            await self.sio.emit("ai_response", {
+                "case_id": self.case_id,
+                "message": {
+                    "id": user_msg_id,
+                    "role": "user",
+                    "content": f"🎙️ {user_text}",
+                    "timestamp": timestamp,
+                    "citation": None,
+                    "source": "voice",
+                },
+            }, to=self.sid)
+
+            # Emit the AI response to the chat panel
+            await self.sio.emit("ai_response", {
+                "case_id": self.case_id,
+                "message": {
+                    "id": ai_msg_id,
+                    "role": "ai",
+                    "content": ai_text,
+                    "timestamp": timestamp,
+                    "citation": None,
+                    "source": "voice",
+                },
+            }, to=self.sid)
+
             # Send AI audio separately (only if TTS succeeded)
             if audio_base64:
+                # Drain the audio queue to discard any chunks accumulated during the LLM/TTS generation phase
+                while not self.audio_queue.empty():
+                    try:
+                        self.audio_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+
                 # Mark AI as speaking so we block interruptions or trigger VAD cut-offs
                 self.is_ai_speaking = True
+                self._speaking_start_time = asyncio.get_event_loop().time()
+                self._interruption_streak = 0
                 await self.sio.emit("call_ai_audio", {
                     "case_id": self.case_id,
                     "audio_data": audio_base64,
@@ -547,6 +620,27 @@ class CallSession:
             print(f"[call] TTS error for case {self.case_id}: {error}")
             traceback.print_exc()
             return None
+
+    async def _save_voice_message_to_chat(self, role: str, content: str) -> str:
+        """
+        Persists a voice call message to the CaseMessage table so it
+        shows up in the Intelligence Stream chat panel.
+        Returns the message ID as a string.
+        """
+        def _save():
+            msg = CaseMessage(
+                case_id=self.case_id,
+                role=role,
+                content=content,
+            )
+            with Session(engine) as db:
+                db.add(msg)
+                db.commit()
+                db.refresh(msg)
+                return str(msg.id)
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _save)
 
     def mark_ai_done_speaking(self):
         """Called when the client confirms AI audio finished playing."""

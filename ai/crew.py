@@ -179,12 +179,27 @@ def run_chat_crew(context: str, vault_content: str, user_query: str) -> str:
     search_tools = []
     try:
         from crewai_tools import TavilySearchResults
-        search_tools = [TavilySearchResults()]
+        search_tools = [TavilySearchResults(
+            include_domains=[
+                "bailii.org",
+                "legislation.gov.uk",
+                "scotcourts.gov.uk",
+                "gov.uk",
+            ]
+        )]
     except Exception:
         try:
             from langchain_tavily import TavilySearch
             from crewai.tools import tool as crewai_tool 
-            _tavily = TavilySearch(max_results=3)
+            _tavily = TavilySearch(
+                max_results=3,
+                include_domains=[
+                    "bailii.org",
+                    "legislation.gov.uk",
+                    "scotcourts.gov.uk",
+                    "gov.uk",
+                ],
+            )
 
             @crewai_tool("Tavily Web Search")
             def tavily_search(query: str) -> str:
@@ -664,37 +679,37 @@ def is_url_working(url: str) -> bool:
     if not parsed.scheme or parsed.scheme not in ('http', 'https'):
         return False
         
-    # Helper to check with a specific method
-    def check_method(method: str) -> tuple[bool, int | None]:
-        try:
-            req = urllib.request.Request(
-                url, 
-                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-            )
-            req.get_method = lambda: method
-            with urllib.request.urlopen(req, timeout=2.0) as response:
-                return (response.status < 400, response.status)
-        except urllib.error.HTTPError as e:
-            return (False, e.code)
-        except Exception:
-            return (False, None)
+    try:
+        req = urllib.request.Request(
+            url, 
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        )
+        # Use GET so we can inspect the response body for soft 404s
+        with urllib.request.urlopen(req, timeout=3.0) as response:
+            if response.status >= 400:
+                return False
+                
+            # Read first 4KB of the HTML body to detect soft 404s
+            html = response.read(4096).decode("utf-8", errors="ignore").lower()
             
-    # Try HEAD first
-    success, code = check_method("HEAD")
-    if success:
-        return True
-    if code in (401, 403):
-        return True
-        
-    # If code is 405 (Method Not Allowed) or other non-404, try GET
-    if code is not None and code != 404:
-        success, code = check_method("GET")
-        if success:
+            # Common soft 404 / missing file indicators
+            if "not on our system" in html:            # BAILII's exact missing case message
+                return False
+            if "bailii >> not found" in html:          # BAILII's navigation breadcrumb on 404
+                return False
+            if "<title>not found</title>" in html or "<title>404" in html:
+                return False
+            if "<h1>not found</h1>" in html or "<h1>404" in html:
+                return False
+                
             return True
-        if code in (401, 403):
+    except urllib.error.HTTPError as e:
+        # Access forbidden/unauthorized is considered "working" (auth-gate, not a 404)
+        if e.code in (401, 403):
             return True
-            
-    return False
+        return False
+    except Exception:
+        return False
 
 
 def verify_urls_in_parallel(urls: list[str]) -> dict[str, bool]:
@@ -818,12 +833,27 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
     search_tools = []
     try:
         from crewai_tools import TavilySearchResults
-        search_tools = [TavilySearchResults()]
+        search_tools = [TavilySearchResults(
+            include_domains=[
+                "bailii.org",
+                "legislation.gov.uk",
+                "scotcourts.gov.uk",
+                "gov.uk",
+            ]
+        )]
     except Exception:
         try:
             from langchain_tavily import TavilySearch
             from crewai.tools import tool as crewai_tool
-            _tavily = TavilySearch(max_results=5)
+            _tavily = TavilySearch(
+                max_results=5,
+                include_domains=[
+                    "bailii.org",
+                    "legislation.gov.uk",
+                    "scotcourts.gov.uk",
+                    "gov.uk",
+                ],
+            )
 
             @crewai_tool("Tavily Web Search")
             def tavily_search(query: str) -> str:
@@ -904,6 +934,10 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
             "You are provided with the raw RESEARCH FINDINGS from the previous task. Your goal is to structure this into a high-level strategic memo.\n\n"
             "CORE DIRECTIVES:\n\n"
             "1. LIABILITY SUMMARY: Provide a detailed, professional summary of actual legal liabilities and insights found (strictly no disclaimers or simulated text).\n\n"
+            "   CRITICAL OUTPUT RULES (ZERO-HALLUCINATION ENFORCED):\n"
+            "   - MANDATORY EVIDENCE LINKING: Every claim in the 'liability_summary' MUST include a reference to an item in the 'evidence_log'. If you cannot link a claim to evidence, do not write it.\n"
+            "   - NO GENERIC FILLER: Absolutely ban phrases like 'The defendant...' or generic liability claims if you do not have specific, evidence-backed proof of the defendant's specific action. If evidence is missing, state: 'Insufficient evidence to determine [X]'.\n"
+            "   - SOURCE VERIFICATION: You are only allowed to cite cases and statutes found in the provided raw RESEARCH FINDINGS. If you mention a case not present in the provided findings, you are hallucinating. Strictly no simulated cases or fake URLs.\n\n"
             "2. EVIDENCE LOG: Convert the research findings into a list of structured evidence items. Each item must have a real title, detailed summary, full complete source URL, and type.\n\n"
             "3. TACTICAL LEVERAGE ANALYSIS (leverage_strategy):\n"
             "   - settlement_trigger: The single most powerful fact from the Evidence Log creating maximum settlement pressure.\n"
