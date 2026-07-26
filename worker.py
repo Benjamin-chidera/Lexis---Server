@@ -4,8 +4,10 @@ worker.py
 RQ worker entry point for background legal research.
 
 Run with:
-    source .venv/bin/activate
-    rq worker --url redis://localhost:6379 legal
+    uv run rq worker --worker-class rq.SimpleWorker --url redis://localhost:6379 legal
+
+    SimpleWorker runs jobs in the main process (no fork), which avoids
+    macOS SIGABRT crashes caused by Objective-C runtime + fork() conflicts.
 
 The worker picks up jobs from the "legal" queue, runs CrewAI research,
 saves results to Postgres (Neon), and publishes a Redis pub/sub message

@@ -43,6 +43,19 @@ def analyst_node(state: CaseState) -> dict:
     urls = state.get("urls", [])
     image_paths = state.get("image_paths", []) 
 
+    # Fast-path: skip expensive vault search + LLM audit for greetings and research commands
+    query_lower = user_query.lower().strip()
+    greetings = {"hi", "hello", "hey", "greetings", "good morning", "good afternoon", "who are you", "how can you help"}
+    is_greeting = query_lower in greetings or any(query_lower.startswith(g + " ") for g in greetings)
+    is_research_cmd = any(cmd in query_lower for cmd in ["run research", "do research", "start research", "background research", "do some research", "dive deep", "do deep research"])
+
+    if is_greeting or is_research_cmd:
+        print(f"[graph] analyst_node: Skipping vault audit for casual query '{query_lower}'")
+        return {
+            "vault_chunks": [],
+            "analyst_findings": "Skipped: query does not require document analysis.",
+        }
+
     # Emit progress to the client so the UI shows the AI is working
     if emitter:
         emitter.emit_stage("analyst", "🔍 Auditing case documents for vulnerabilities...")
@@ -98,7 +111,20 @@ def researcher_node(state: CaseState) -> dict:
     opponent lost or settled.
     """
     context = state.get("context", "")
+    user_query = state.get("current_query", "").lower().strip()
     emitter = state.get("emitter")
+
+    # Fast check: If the query is a simple greeting, capability question,
+    # or research command, skip the web search since the Strategist won't need web findings
+    greetings = {"hi", "hello", "hey", "greetings", "good morning", "good afternoon", "who are you", "how can you help"}
+    is_greeting = user_query in greetings or any(user_query.startswith(g + " ") for g in greetings)
+    is_research_cmd = any(cmd in user_query for cmd in ["run research", "do research", "start research", "background research", "do some research", "dive deep", "do deep research"])
+
+    if is_greeting or is_research_cmd:
+        print(f"[graph] researcher_node: Skipping web search for query '{user_query}'")
+        return {
+            "researcher_findings": "Skipped: query does not require real-time web search."
+        }
 
     # Emit progress to the client
     if emitter:
@@ -168,7 +194,7 @@ def strategist_node(state: CaseState) -> dict:
             "filename": filename if filename else "Case Vault",
             "exhibit": "Case Vault Document",
         }
-    elif researcher_findings and "No web precedents" not in researcher_findings:
+    elif researcher_findings and "No web precedents" not in researcher_findings and "Skipped:" not in researcher_findings:
         citation = {
             "filename": "Web Research",
             "exhibit": "External Sources",

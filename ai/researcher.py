@@ -105,6 +105,12 @@ def run_researcher(context: str, analyst_findings: str) -> str:
             search_tool = TavilySearch(
                 max_results=2,             # 2 results per query is enough
                 search_depth="advanced",   # Deeper search for legal content
+                include_domains=[
+                    "bailii.org",          # UK & Irish case law (gold standard)
+                    "legislation.gov.uk",  # Official UK statutes
+                    "scotcourts.gov.uk",   # Scottish court judgments
+                    "gov.uk",              # UK government regulatory guidance
+                ],
             )
             raw_results = search_tool.invoke(query)
 

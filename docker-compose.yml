@@ -1,3 +1,5 @@
+name: "legal-assistant"
+
 # LOCAL DEVELOPMENT ONLY — Production uses Dokploy
 services:
   redis:
@@ -12,12 +14,15 @@ services:
     build: .
     container_name: legal-assistant-api
     ports:
-      - "8000:8000"
+      - "3002:3002"
     env_file: .env
     environment:
       - REDIS_URL=redis://redis:6379
       - ENVIRONMENT=development
       - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse-server:3000}
+    volumes:
+      - .:/app
+      - /app/.venv
     depends_on:
       - redis
 
@@ -30,11 +35,15 @@ services:
       - REDIS_URL=redis://redis:6379
       - ENVIRONMENT=development
       - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse-server:3000}
+    volumes:
+      - .:/app
+      - /app/.venv
     depends_on:
       - redis
 
   dashboard:
     image: cjlapao/rq-dashboard:latest
+    platform: linux/amd64
     container_name: legal-assistant-dashboard
     ports:
       - "9181:9181"
@@ -47,7 +56,7 @@ services:
     image: ghcr.io/langfuse/langfuse:2
     container_name: legal-assistant-langfuse
     ports:
-      - "3000:3000"
+      - "3005:3000"
     environment:
       - DATABASE_URL=${DATABASE_URL}
       # - DATABASE_URL=${LANGFUSE_DB_URL}
