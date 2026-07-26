@@ -1,3 +1,6 @@
+import os
+os.environ["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] = "YES"
+
 # --- Mistral SDK import patch for older/newer library compatibility ---
 try:
     import sys
@@ -7,35 +10,21 @@ try:
 except Exception:
     pass
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 from typing import List
 from crewai import Agent, Task, Crew, Process
 from .model_providers import get_crew_llm
 import litellm
+import json
+import re
+import ast
+import time
 
 
 # ---------------------------------------------------------------------------
 # Mistral Message Order Fix
-#
-# Mistral's API strictly requires:
-#   1. Messages must alternate roles (user -> assistant -> user -> ...).
-#   2. The LAST message must have role "user" or "tool".
-#
-# CrewAI's internal tool-calling loop sometimes produces consecutive
-# messages with the same role (e.g. two "assistant" messages in a row),
-# which causes a 400 error: "Expected last role User or Tool".
-#
-# We monkey-patch both litellm.completion and litellm.acompletion
-# to sanitize messages before they reach the Mistral API.
 # ---------------------------------------------------------------------------
 def _fix_messages(messages: list) -> list:
-    """
-    Return a sanitized copy of the message list that satisfies Mistral's
-    strict role-alternation rules:
-      - Merge consecutive same-role messages (except 'tool' messages,
-        which carry distinct tool_call_ids and must stay separate).
-      - Ensure the final message is never role='assistant'.
-    """
     if not messages or len(messages) < 2:
         return messages
 
@@ -47,13 +36,11 @@ def _fix_messages(messages: list) -> list:
             continue
 
         last_msg = merged[-1]
-        # Never merge 'tool' messages — each has a unique tool_call_id
         if msg_copy["role"] == last_msg["role"] and msg_copy["role"] != "tool":
             content1 = last_msg.get("content") or ""
             content2 = msg_copy.get("content") or ""
             last_msg["content"] = (str(content1) + "\n\n" + str(content2)).strip()
 
-            # Preserve any tool_calls from the merged message
             if "tool_calls" in msg_copy:
                 if "tool_calls" not in last_msg:
                     last_msg["tool_calls"] = []
@@ -63,18 +50,13 @@ def _fix_messages(messages: list) -> list:
         else:
             merged.append(msg_copy)
 
-    # If the last message is 'assistant', Mistral will reject it.
-    # Append a user message to satisfy the constraint.
     if merged and merged[-1]["role"] == "assistant":
         merged.append({"role": "user", "content": "Please continue."})
 
     return merged
 
 
-# Monkey-patch litellm.completion AND litellm.acompletion once.
-# The guard prevents double-patching if this module is imported more than once.
 if not getattr(litellm, "_mistral_msg_fix_applied", False):
-    # Patch synchronous completion (used by CrewAI's default path)
     _orig_completion = litellm.completion
 
     def _patched_completion(*args, **kwargs):
@@ -84,7 +66,6 @@ if not getattr(litellm, "_mistral_msg_fix_applied", False):
 
     litellm.completion = _patched_completion
 
-    # Patch async completion (in case CrewAI uses the async path)
     _orig_acompletion = litellm.acompletion
 
     async def _patched_acompletion(*args, **kwargs):
@@ -99,145 +80,102 @@ if not getattr(litellm, "_mistral_msg_fix_applied", False):
 # Centralized LLM for all agents
 llm = get_crew_llm()
 
+# Domain whitelist for output URL filtering
+ALLOWED_DOMAINS = [
+    "bailii.org",
+    "legislation.gov.uk",
+    "scotcourts.gov.uk",
+    "gov.uk",
+]
 
-# ---------------------------------------------------------------------------
-# Pydantic output model for the background research task.
-# Forces the LLM to return a structured, validated object instead of
-# a free-form string. This is what stops it from skipping citations.
-# ---------------------------------------------------------------------------
+
+def _is_allowed_domain(url: str) -> bool:
+    from urllib.parse import urlparse
+    try:
+        hostname = urlparse(url).hostname or ""
+        hostname = hostname.lower()
+        return any(
+            hostname == domain or hostname.endswith(f".{domain}")
+            for domain in ALLOWED_DOMAINS
+        )
+    except Exception:
+        return False
+
+
 class EvidenceItem(BaseModel):
-    # A single piece of evidence found by the agent
     title: str = Field(description="Short title of the finding")
     summary: str = Field(description="Complete, detailed summary of why this is relevant to the case")
     source_url: str = Field(
         description=(
-            "The FULL, complete URL starting with https://. "
-            "NEVER truncate. NEVER use partial URLs. "
-            "Example: 'https://www.reuters.com/full/path/to/article'. "
-            "If no URL is available, write 'URL: Available upon request from court records'. "
-            "Do NOT guess or invent a broken link."
+            "The exact URL starting with https:// for web search items, "
+            "or the document name (e.g. 'Benchmark Case Pack.pdf') for internal vault documents."
         )
     )
     evidence_type: str = Field(description="One of: URL, PDF Record, Court Docket, Media/Image")
 
-    @field_validator('source_url')
-    @classmethod
-    def url_must_be_complete(cls, v: str) -> str:
-        # Strip whitespace to avoid hidden truncation
-        v = v.strip()
-
-        # If it looks like a truncated URL (no http, not a docket, and not court records warning), flag it
-        if v and not v.startswith('http') and 'No.' not in v and 'Docket' not in v and 'Available upon request' not in v:
-            # Prefix a warning so it's visible in the UI
-            return f"[INCOMPLETE URL — check source] {v}"
-
-        return v
-
 
 class LeverageStrategy(BaseModel):
-    """Tactical leverage analysis produced after the liability summary and evidence log."""
     settlement_trigger: str = Field(
-        description=(
-            "The single most powerful fact from the Evidence Log that creates "
-            "maximum settlement pressure on the opposing party."
-        )
+        description="The single most powerful fact from the Evidence Log that creates maximum settlement pressure."
     )
     barriers_to_defense: str = Field(
-        description=(
-            "The opponent's most likely defense, followed by the direct "
-            "counter-argument grounded in the statutes or evidence cited."
-        )
+        description="The opponent's most likely defense, followed by the direct counter-argument."
     )
     next_tactical_move: str = Field(
-        description=(
-            "The exact recommended next step to force a win — e.g. file an "
-            "interim injunction, issue a preservation order, send a Pre-Action "
-            "Protocol letter citing the specific regulatory notice."
-        )
+        description="The exact recommended next step to force a win."
     )
 
 
 class ResearchOutput(BaseModel):
-    # The full structured output of the research task
     liability_summary: str = Field(description="High-level summary of the opponent's legal vulnerabilities")
     evidence_log: List[EvidenceItem] = Field(description="List of all evidence items found, each with a source URL")
-    leverage_strategy: LeverageStrategy = Field(description="Tactical Leverage Analysis: settlement trigger, barriers to defense, and next tactical move")
-    source_index: List[str] = Field(description="A complete list of ALL relevant URLs found during the search for further reading")
+    leverage_strategy: LeverageStrategy = Field(description="Tactical Leverage Analysis")
+    source_index: List[str] = Field(description="A complete list of ALL relevant URLs found during the search")
 
 
 def run_chat_crew(context: str, vault_content: str, user_query: str) -> str:
-    """ 
-    Runs a CrewAI crew to answer the user's question about the case.
-
-    The crew has one agent (Lexis AI) that reads the provided documents
-    and context, then generates a cited response.
-
-    Returns the AI's response as a plain string.
     """
-  
-    # Load Tavily search tool if configured
-    search_tools = []
+    Runs a CrewAI crew to answer the user's question about the case.
+    """
     try:
-        from crewai_tools import TavilySearchResults
-        search_tools = [TavilySearchResults(
-            include_domains=[
-                "bailii.org",
-                "legislation.gov.uk",
-                "scotcourts.gov.uk",
-                "gov.uk",
-            ]
-        )]
+        from crewai.tools import tool as crewai_tool
+
+        @crewai_tool("Tavily Web Search")
+        def tavily_search(query: str) -> str:
+            """Search UK legal databases (BAILII, legislation.gov.uk, gov.uk, scotcourts.gov.uk) for legal precedents, statutes, and regulatory guidelines."""
+            clean_q = query.strip()
+            if len(clean_q) > 100:
+                words = [w for w in re.findall(r'\b\w+\b', clean_q) if len(w) > 3 and w.lower() not in ('where', 'which', 'there', 'their', 'about', 'would', 'could', 'should', 'actual', 'please', 'find')]
+                clean_q = " ".join(words[:8])
+            
+            results = search_tavily(clean_q)
+            if not results:
+                return "No web search results found on official legal domains."
+
+            formatted = []
+            for r in results:
+                u = r.get("url", "")
+                if u and _is_allowed_domain(u):
+                    formatted.append(f"Title: {r.get('title')}\nURL: {u}\nSnippet: {r.get('content')}")
+            return "\n\n".join(formatted) if formatted else "No web search results found on official legal domains."
+
+        search_tools = [tavily_search]
     except Exception:
-        try:
-            from langchain_tavily import TavilySearch
-            from crewai.tools import tool as crewai_tool 
-            _tavily = TavilySearch(
-                max_results=3,
-                include_domains=[
-                    "bailii.org",
-                    "legislation.gov.uk",
-                    "scotcourts.gov.uk",
-                    "gov.uk",
-                ],
-            )
-
-            @crewai_tool("Tavily Web Search")
-            def tavily_search(query: str) -> str:
-                """Search the web for legal information using Tavily."""
-                return str(_tavily.invoke(query))
-
-            search_tools = [tavily_search]
-        except Exception:
-            pass
+        search_tools = []
 
     lexis_agent = Agent(
         role="Lexis AI Legal Assistant",
         goal=(
             "Answer the user's legal question accurately using the provided "
-            "case documents. For every key fact you state, add a citation in "
-            "brackets like [Source: contract.pdf, Page 3] or [Source: pacer.gov]."
+            "case documents and web search results. Cite your sources using exact URLs."
         ),
         backstory=(
             "You are Lexis AI, an expert civil litigation research assistant. "
-            "You have been given extracted text from case documents and web pages. "
             "You answer questions clearly and always cite the source of each fact. "
-            "[LEGAL CLASSIFICATION PROTOCOL]\n"
-            "CIVIL VS. CRIMINAL: If you identify a precedent or statute that is criminal "
-            "in nature (e.g., Computer Misuse Act 1990), do not discard it. Instead, label "
-            "it explicitly under a section titled 'CRIMINAL LEVERAGE OPPORTUNITIES.' "
-            "You must clearly distinguish between Civil Remedies (Injunctions, Damages) and "
-            "Criminal Liability (Police Referral, Prosecution). "
-            "When citing criminal statutes, clearly state: 'This is a criminal statute. It "
-            "establishes potential grounds for a police report, which could be used as leverage "
-            "to accelerate a civil settlement.' "
-            "ZERO HALLUCINATION: You are strictly prohibited from fabricating cases. If you "
-            "cite a criminal statute, quote the actual text of the Act. Do not invent cases "
-            "like 'R v Smith' to fit the statute. If a fact or citation is not in the "
-            "provided documents, you must state: 'The provided sources do not contain this "
-            "information.'\n\n"
             "CITATION AND URL PROTOCOL:\n"
-            "- You are NOT allowed to guess or fabricate URLs. If you cite a case, use the correct BAILII citation format (e.g., [2022] CSIH 45). "
-            "If you do not have the live URL returned by the search tool, simply write 'URL: Available upon request from court records' instead of inventing a broken link."
+            "- Copy the exact, full URL starting with https:// for web citations from bailii.org, legislation.gov.uk, scotcourts.gov.uk, or gov.uk.\n"
+            "- Always present web search citations as clickable Markdown hyperlinks like [Source](https://www.legislation.gov.uk/...).\n"
+            "- Do NOT fabricate or invent URLs outside the provided search results."
         ),
         llm=llm,
         tools=search_tools,
@@ -253,36 +191,10 @@ def run_chat_crew(context: str, vault_content: str, user_query: str) -> str:
             "If the documents do not fully answer the question, or if you need external legal facts, "
             "use your search tool to find the required information online. "
             "Provide a clear, detailed answer. "
-            "Cite your sources using [Source: ...] inline after each key fact. "
-            "If you used the web search, cite the URL.\n\n"
-            "[LEGAL CLASSIFICATION PROTOCOL]\n"
-            "1. CIVIL VS. CRIMINAL DISTINCTION: If you identify a precedent or statute that is "
-            "criminal in nature (e.g., Computer Misuse Act 1990), do NOT discard it. Instead, "
-            "label it explicitly under a section titled 'CRIMINAL LEVERAGE OPPORTUNITIES.' "
-            "Clearly distinguish between Civil Remedies (Injunctions, Damages) and Criminal "
-            "Liability (Police Referral, Prosecution).\n"
-            "2. ADVISORY NOTE: When citing criminal statutes, clearly state: 'This is a criminal "
-            "statute. It establishes potential grounds for a police report, which could be used "
-            "as leverage to accelerate a civil settlement.'\n"
-            "3. ZERO HALLUCINATION: You are strictly prohibited from fabricating cases. If you "
-            "cite a criminal statute (e.g., Computer Misuse Act 1990), quote the actual text of "
-            "the Act. Do not invent cases like 'R v Smith' to fit the statute. If a fact or "
-            "citation is not in the provided documents or search results, state: 'The provided "
-            "sources do not contain this information.'\n"
-            "4. SELF-REVIEW: Before finalising your response, review every citation "
-            "(Case Name, Year, Court). If you cannot verify that the citation exists in "
-            "the provided documents or search results, delete it from your response entirely. "
-            "An uncited fact is better than a fabricated citation.\n"
-            "5. CITATION & URL PROTOCOL: You are NOT allowed to guess or fabricate URLs. If you cite a case, "
-            "use the correct BAILII citation format (e.g., [2022] CSIH 45). If you do not have the live URL, "
-            "simply write 'URL: Available upon request from court records' instead of inventing a broken link."
+            "Cite your sources using exact URLs as clickable links [Source](https://...)."
         ),
         expected_output=(
-            "A well-reasoned answer to the user's legal question with inline "
-            "citations pointing back to the source documents. Every citation must "
-            "be verifiable from the provided case documents or search results. "
-            "Criminal statutes must be clearly labeled under CRIMINAL LEVERAGE OPPORTUNITIES. "
-            "No fabricated cases."
+            "A well-reasoned answer to the user's legal question with inline citations."
         ),
         agent=lexis_agent,
     )
@@ -300,17 +212,44 @@ def run_chat_crew(context: str, vault_content: str, user_query: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Helper functions for formatting research output into Markdown
+# CONTAMINATION GUARD
 # ---------------------------------------------------------------------------
+_CONTAMINATION_MARKERS = [
+    "INCOMPLETE URL",
+    "check source]",
+    "[crew]",
+    "Links are AI-generated",
+]
+
+
+def _scan_for_contamination(chunks: list[str], case_id: int) -> list[str]:
+    clean_chunks = []
+    contaminated_count = 0
+
+    for chunk in chunks:
+        if any(marker.lower() in chunk.lower() for marker in _CONTAMINATION_MARKERS):
+            contaminated_count += 1
+            print(
+                f"[crew] CONTAMINATION DETECTED in vault chunk for case {case_id} — "
+                f"this looks like a previous AI-generated memo output that got "
+                f"ingested back into the vector store. First 200 chars: {chunk[:200]!r}",
+                flush=True,
+            )
+            continue
+        clean_chunks.append(chunk)
+
+    if contaminated_count:
+        print(
+            f"[crew] WARNING: {contaminated_count}/{len(chunks)} vault chunks for case "
+            f"{case_id} were discarded as contaminated.",
+            flush=True,
+        )
+
+    return clean_chunks
+
 
 def _flatten_liability_summary(summary_dict: dict) -> str:
-    """
-    Converts a nested liability_summary dict (with core_findings,
-    strategic_leverage, etc.) into a readable Markdown string.
-    """
     parts = []
-
-    # Handle core_findings list
     findings = summary_dict.get("core_findings", [])
     if findings:
         for finding in findings:
@@ -321,40 +260,44 @@ def _flatten_liability_summary(summary_dict: dict) -> str:
                     parts.append(f"**Finding:** {text}")
                 if implications:
                     parts.append(f"*Legal Implications:* {implications}")
-                parts.append("")  # blank line separator
+                parts.append("")
             else:
                 parts.append(str(finding))
 
-    # Handle strategic_leverage section
     leverage = summary_dict.get("strategic_leverage", {})
     if leverage:
         defensive = leverage.get("defensive", [])
         offensive = leverage.get("offensive", [])
-
         if defensive:
             parts.append("**Defensive Strategies:**")
             for item in defensive:
                 parts.append(f"- {item}")
             parts.append("")
-
         if offensive:
             parts.append("**Offensive Strategies:**")
             for item in offensive:
                 parts.append(f"- {item}")
             parts.append("")
 
-    # If none of the above matched, just stringify whatever we got
     if not parts:
         return str(summary_dict)
 
     return "\n".join(parts).strip()
 
 
+def _clean_vault_reference(source_str: str) -> str:
+    from urllib.parse import unquote
+
+    text = unquote(source_str)
+    for marker in _CONTAMINATION_MARKERS:
+        text = re.sub(re.escape(marker), "", text, flags=re.IGNORECASE)
+    text = text.replace("[", "").replace("]", "")
+    text = re.sub(r'\b\d{9,12}_', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
 def _format_research_output(output: "ResearchOutput") -> str:
-    """
-    Formats a validated ResearchOutput Pydantic object into clean Markdown
-    with clickable source links.
-    """
     lines = []
     lines.append("## Strategic Legal Memo")
     lines.append(f"\n### Liability Summary\n{output.liability_summary}")
@@ -363,9 +306,15 @@ def _format_research_output(output: "ResearchOutput") -> str:
     for item in output.evidence_log:
         lines.append(f"\n#### [{item.evidence_type}] {item.title}")
         lines.append(f"{item.summary}")
-        lines.append(f"[Source]({item.source_url})")
 
-    # Leverage & Winning Strategy section
+        source_url = item.source_url.strip()
+        if source_url.startswith("http"):
+            lines.append(f"[Source]({source_url})")
+        else:
+            clean_name = _clean_vault_reference(source_url)
+            if clean_name:
+                lines.append(f"📄 Source: {clean_name}")
+
     leverage = output.leverage_strategy
     lines.append("\n---")
     lines.append("\n### LEVERAGE & WINNING STRATEGY")
@@ -373,53 +322,54 @@ def _format_research_output(output: "ResearchOutput") -> str:
     lines.append(f"\n**BARRIERS TO DEFENSE**\n{leverage.barriers_to_defense}")
     lines.append(f"\n**NEXT TACTICAL MOVE**\n{leverage.next_tactical_move}")
 
-    lines.append("\n### Full Source Index (For Further Reading)")
+    lines.append("\n### Source Index")
     for url in output.source_index:
-        lines.append(f"- [{url}]({url})")
+        url_clean = url.strip()
+        if url_clean.startswith("http"):
+            lines.append(f"- [{url_clean}]({url_clean})")
+        else:
+            clean_name = _clean_vault_reference(url_clean)
+            if clean_name:
+                lines.append(f"- 📄 {clean_name}")
 
     return "\n".join(lines)
 
 
 def _format_raw_research_dict(data: dict) -> str:
-    """
-    Last-resort formatter that takes a raw dict (when Pydantic validation
-    fails entirely) and extracts whatever it can into readable Markdown.
-    """
-    # Mistral sometimes wraps the response in an outer "ResearchOutput" key
     if "ResearchOutput" in data and isinstance(data["ResearchOutput"], dict):
         data = data["ResearchOutput"]
 
     lines = []
     lines.append("## Strategic Legal Memo")
 
-    # Liability summary — could be a string or a nested dict
     summary = data.get("liability_summary", "")
     if isinstance(summary, dict):
         summary = _flatten_liability_summary(summary)
     if summary:
         lines.append(f"\n### Liability Summary\n{summary}")
 
-    # Evidence log
     evidence = data.get("evidence_log", [])
     if evidence:
         lines.append("\n### Evidence Log")
         for item in evidence:
             if isinstance(item, dict):
-                # Get the type field (could be 'type' or 'evidence_type')
                 evidence_type = item.get("evidence_type", item.get("type", "Evidence"))
                 title = item.get("title", "Untitled")
                 item_summary = item.get("summary", "")
-                url = item.get("source_url", "")
+                url = str(item.get("source_url", ""))
 
                 lines.append(f"\n#### [{evidence_type}] {title}")
                 if item_summary:
                     lines.append(f"{item_summary}")
                 if url and url.startswith("http"):
                     lines.append(f"[Source]({url})")
+                elif url:
+                    clean_name = _clean_vault_reference(url)
+                    if clean_name:
+                        lines.append(f"📄 Source: {clean_name}")
             else:
                 lines.append(f"- {str(item)}")
 
-    # Leverage & Winning Strategy section (raw dict fallback)
     leverage = data.get("leverage_strategy", {})
     if isinstance(leverage, dict) and leverage:
         lines.append("\n---")
@@ -434,127 +384,26 @@ def _format_raw_research_dict(data: dict) -> str:
         if next_move:
             lines.append(f"\n**NEXT TACTICAL MOVE**\n{next_move}")
 
-    # Source index
-    sources = data.get("source_index", [])
-    if sources:
-        lines.append("\n### Full Source Index (For Further Reading)")
-        for url in sources:
-            if isinstance(url, str) and url.startswith("http"):
-                lines.append(f"- [{url}]({url})")
-            else:
-                lines.append(f"- {url}")
-
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Model-agnostic JSON extraction helpers
-#
-# These functions handle the many different ways LLMs wrap structured output
-# so that switching models never breaks the formatted research memo.
-# ---------------------------------------------------------------------------
-
-import json
-import re
-import ast
-
-
-def _extract_json_from_raw_text(raw_text: str) -> dict | None:
-    """
-    Attempts every known extraction strategy to pull a JSON dict out of
-    an LLM's raw text output. Returns the parsed dict or None.
-
-    Handles:
-      - Clean JSON
-      - Markdown ```json ... ``` blocks
-      - "Final Answer": "{...}" (JSON-as-escaped-string)
-      - "Final Answer": { ... }  (JSON-as-dict)
-      - Outer wrappers like {"ResearchOutput": {...}}
-      - Brace-matching extraction as a last resort
-    """
-    if not raw_text:
-        return None
-
-    # --- Step 1: Strip markdown code fences ---
-    cleaned = raw_text
-    if "```json" in cleaned:
-        # Take the content inside the LAST ```json ... ``` block
-        parts = cleaned.split("```json")
-        last_block = parts[-1]
-        if "```" in last_block:
-            cleaned = last_block.split("```")[0].strip()
-    elif cleaned.startswith("```") and cleaned.endswith("```"):
-        cleaned = "\n".join(cleaned.split("\n")[1:-1]).strip()
-
-    # --- Step 2: Try direct JSON parse ---
-    parsed = _try_parse_json(cleaned)
-    if parsed:
-        return _unwrap_outer_keys(parsed)
-
-    # --- Step 3: Handle "Final Answer" wrapper ---
-    # Many models return: ... "Final Answer": "{...}" or "Final Answer": {...}
-    final_answer_match = re.search(
-        r'"Final Answer"\s*:\s*', raw_text, re.IGNORECASE
-    )
-    if final_answer_match:
-        after_key = raw_text[final_answer_match.end():].strip()
-
-        # Case A: The value is a JSON string (starts with quote)
-        if after_key.startswith('"'):
-            # Extract the string value — it may contain escaped JSON
-            try:
-                # Wrap in an object to let json.loads handle the escaping
-                wrapper = '{"__val__": ' + after_key.rstrip().rstrip("}").rstrip(",") + "}"
-                val = json.loads(wrapper).get("__val__", "")
-                inner = _try_parse_json(val)
-                if inner:
-                    return _unwrap_outer_keys(inner)
-            except Exception:
-                pass
-
-            # Brute force: find JSON substring inside the string value
-            inner_json = _extract_first_json_object(after_key)
-            if inner_json:
-                return _unwrap_outer_keys(inner_json)
-
-        # Case B: The value is a direct JSON object (starts with brace)
-        if after_key.startswith("{"):
-            inner_json = _extract_first_json_object(after_key)
-            if inner_json:
-                return _unwrap_outer_keys(inner_json)
-
-    # --- Step 4: Last resort — find the first valid JSON object anywhere ---
-    found = _extract_first_json_object(raw_text)
-    if found:
-        return _unwrap_outer_keys(found)
-
-    return None
-
-
 def _try_parse_json(text: str) -> dict | None:
-    """Try json.loads, then ast.literal_eval. Returns dict or None."""
     try:
         result = json.loads(text)
         if isinstance(result, dict):
             return result
     except (json.JSONDecodeError, ValueError):
         pass
-
     try:
         result = ast.literal_eval(text)
         if isinstance(result, dict):
             return result
     except (ValueError, SyntaxError):
         pass
-
     return None
 
 
 def _extract_first_json_object(text: str) -> dict | None:
-    """
-    Finds the first '{' in text and uses brace-matching to extract
-    the complete JSON object. Handles nested braces correctly.
-    """
     start = text.find("{")
     if start == -1:
         return None
@@ -565,22 +414,17 @@ def _extract_first_json_object(text: str) -> dict | None:
 
     for i in range(start, len(text)):
         char = text[i]
-
         if escape_next:
             escape_next = False
             continue
-
         if char == "\\":
             escape_next = True
             continue
-
         if char == '"' and not escape_next:
             in_string = not in_string
             continue
-
         if in_string:
             continue
-
         if char == "{":
             depth += 1
         elif char == "}":
@@ -592,21 +436,21 @@ def _extract_first_json_object(text: str) -> dict | None:
                     return parsed
                 break
 
+    if depth > 0:
+        print(
+            f"[crew] TRUNCATION DETECTED: JSON object never closed (depth={depth} "
+            f"at end of text). Check max_tokens ceiling in get_crew_llm().",
+            flush=True,
+        )
     return None
 
 
 def _unwrap_outer_keys(data: dict) -> dict:
-    """
-    Strip known wrapper keys that models add around the actual payload.
-    e.g. {"ResearchOutput": {...}} -> {...}
-         {"Final Answer": {...}}  -> {...}
-    """
     wrapper_keys = ["ResearchOutput", "Final Answer", "final_answer", "output"]
     for key in wrapper_keys:
         if key in data and isinstance(data[key], dict):
             data = data[key]
             break
-        # Some models put the JSON as a string value under the key
         if key in data and isinstance(data[key], str):
             inner = _try_parse_json(data[key])
             if inner:
@@ -615,48 +459,99 @@ def _unwrap_outer_keys(data: dict) -> dict:
     return data
 
 
+def _extract_json_from_raw_text(raw_text: str) -> dict | None:
+    if not raw_text:
+        return None
+
+    cleaned = raw_text
+    if "```json" in cleaned:
+        parts = cleaned.split("```json")
+        last_block = parts[-1]
+        if "```" in last_block:
+            cleaned = last_block.split("```")[0].strip()
+    elif cleaned.startswith("```") and cleaned.endswith("```"):
+        cleaned = "\n".join(cleaned.split("\n")[1:-1]).strip()
+
+    parsed = _try_parse_json(cleaned)
+    if parsed:
+        return _unwrap_outer_keys(parsed)
+
+    final_answer_match = re.search(r'"Final Answer"\s*:\s*', raw_text, re.IGNORECASE)
+    if final_answer_match:
+        after_key = raw_text[final_answer_match.end():].strip()
+        if after_key.startswith('"'):
+            try:
+                wrapper = '{"__val__": ' + after_key.rstrip().rstrip("}").rstrip(",") + "}"
+                val = json.loads(wrapper).get("__val__", "")
+                inner = _try_parse_json(val)
+                if inner:
+                    return _unwrap_outer_keys(inner)
+            except Exception:
+                pass
+            inner_json = _extract_first_json_object(after_key)
+            if inner_json:
+                return _unwrap_outer_keys(inner_json)
+        if after_key.startswith("{"):
+            inner_json = _extract_first_json_object(after_key)
+            if inner_json:
+                return _unwrap_outer_keys(inner_json)
+
+    found = _extract_first_json_object(raw_text)
+    if found:
+        return _unwrap_outer_keys(found)
+
+    return None
+
+
 def _normalize_to_research_output(parsed: dict) -> "ResearchOutput | None":
-    """
-    Takes a raw parsed dict and normalises it into a valid ResearchOutput
-    Pydantic object. Handles field name variations across models.
-    Returns None if the dict cannot be normalised.
-    """
     try:
         normalized = dict(parsed)
 
-        # If liability_summary is a dict instead of a string, flatten it
         if isinstance(normalized.get("liability_summary"), dict):
-            normalized["liability_summary"] = _flatten_liability_summary(
-                normalized["liability_summary"]
-            )
+            normalized["liability_summary"] = _flatten_liability_summary(normalized["liability_summary"])
 
-        # Fix evidence items that use 'type' instead of 'evidence_type'
         evidence = normalized.get("evidence_log", [])
         if isinstance(evidence, list):
             for item in evidence:
                 if isinstance(item, dict):
+                    if "title" not in item:
+                        for alt in ["claim", "name", "header", "topic"]:
+                            if alt in item:
+                                item["title"] = item.pop(alt)
+                                break
+                    if "title" not in item:
+                        item["title"] = "Legal Finding"
+
+                    if "summary" not in item:
+                        for alt in ["description", "details", "content", "text"]:
+                            if alt in item:
+                                item["summary"] = item.pop(alt)
+                                break
+                    if "summary" not in item:
+                        item["summary"] = "No summary provided."
+
                     if "evidence_type" not in item and "type" in item:
                         item["evidence_type"] = item.pop("type")
-                    # Some models use 'url' instead of 'source_url'
+                    if "evidence_type" not in item:
+                        item_url = str(item.get("source_url", item.get("url", "")))
+                        item["evidence_type"] = "URL" if item_url.startswith("http") else "PDF Record"
+
                     if "source_url" not in item and "url" in item:
                         item["source_url"] = item.pop("url")
-                    # Some models use 'link' instead of 'source_url'
                     if "source_url" not in item and "link" in item:
                         item["source_url"] = item.pop("link")
+                    if "source_url" not in item:
+                        item["source_url"] = ""
 
-        # Some models use 'sources' instead of 'source_index'
         if "source_index" not in normalized and "sources" in normalized:
             normalized["source_index"] = normalized.pop("sources")
 
-        # Normalise leverage_strategy — some models may use alternative key names
         if "leverage_strategy" not in normalized:
             for alt_key in ["leverage", "winning_strategy", "tactical_leverage", "strategy"]:
                 if alt_key in normalized and isinstance(normalized[alt_key], dict):
                     normalized["leverage_strategy"] = normalized.pop(alt_key)
                     break
 
-        # If leverage_strategy is still missing, provide safe defaults so
-        # Pydantic validation doesn't fail on older research results
         if "leverage_strategy" not in normalized:
             normalized["leverage_strategy"] = {
                 "settlement_trigger": "Not available — run a new research cycle to generate tactical analysis.",
@@ -673,51 +568,51 @@ def is_url_working(url: str) -> bool:
     import urllib.request
     import urllib.error
     from urllib.parse import urlparse
-    
+
     url = url.strip().strip('()[]')
     parsed = urlparse(url)
     if not parsed.scheme or parsed.scheme not in ('http', 'https'):
         return False
-        
+
     try:
         req = urllib.request.Request(
-            url, 
+            url,
             headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
         )
-        # Use GET so we can inspect the response body for soft 404s
-        with urllib.request.urlopen(req, timeout=3.0) as response:
+        with urllib.request.urlopen(req, timeout=8.0) as response:
             if response.status >= 400:
+                print(f"[crew] URL check status {response.status}: {url}", flush=True)
                 return False
-                
-            # Read first 4KB of the HTML body to detect soft 404s
+
             html = response.read(4096).decode("utf-8", errors="ignore").lower()
-            
-            # Common soft 404 / missing file indicators
-            if "not on our system" in html:            # BAILII's exact missing case message
-                return False
-            if "bailii >> not found" in html:          # BAILII's navigation breadcrumb on 404
+
+            if "not on our system" in html or "bailii >> not found" in html:
+                print(f"[crew] Soft 404 on BAILII: {url}", flush=True)
                 return False
             if "<title>not found</title>" in html or "<title>404" in html:
+                print(f"[crew] Soft 404 page: {url}", flush=True)
                 return False
             if "<h1>not found</h1>" in html or "<h1>404" in html:
+                print(f"[crew] Soft 404 heading: {url}", flush=True)
                 return False
-                
+
             return True
     except urllib.error.HTTPError as e:
-        # Access forbidden/unauthorized is considered "working" (auth-gate, not a 404)
         if e.code in (401, 403):
             return True
+        print(f"[crew] HTTP Error {e.code} checking {url}", flush=True)
         return False
-    except Exception:
+    except Exception as e:
+        print(f"[crew] Exception checking {url}: {e}", flush=True)
         return False
 
 
 def verify_urls_in_parallel(urls: list[str]) -> dict[str, bool]:
     import concurrent.futures
-    
+
     unique_urls = list(set(urls))
     results = {}
-    
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         future_to_url = {executor.submit(is_url_working, url): url for url in unique_urls}
         for future in concurrent.futures.as_completed(future_to_url):
@@ -726,79 +621,102 @@ def verify_urls_in_parallel(urls: list[str]) -> dict[str, bool]:
                 results[url] = future.result()
             except Exception:
                 results[url] = False
-                
+
     return results
 
 
 def search_tavily(query: str) -> list[dict]:
     import urllib.request
-    import json
     import os
-    
+
     api_key = os.getenv("TAVILY_API_KEY")
     if not api_key:
+        print("[crew] WARNING: TAVILY_API_KEY is not set — web search is disabled, evidence will be vault-only.", flush=True)
         return []
-        
+
     url = "https://api.api.tavily.com/search" if "api.api.tavily.com" in os.getenv("TAVILY_API_URL", "") else "https://api.tavily.com/search"
     payload = {
         "api_key": api_key,
         "query": query,
-        "max_results": 3,
-        "search_depth": "advanced"
+        "max_results": 4,
+        "search_depth": "advanced",
+        "include_domains": ALLOWED_DOMAINS
     }
-    
+
     try:
         req = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"}
         )
-        with urllib.request.urlopen(req, timeout=5.0) as response:
+        with urllib.request.urlopen(req, timeout=6.0) as response:
             data = json.loads(response.read().decode("utf-8"))
-            return data.get("results", [])
+            results = data.get("results", [])
+            print(f"[crew] Tavily raw response for '{query}': {len(results)} total results before domain filter", flush=True)
+            return [r for r in results if r.get("url") and _is_allowed_domain(r["url"])]
     except Exception as e:
-        print(f"[crew] Tavily raw search failed for query '{query}': {e}")
+        print(f"[crew] Tavily raw search FAILED for query '{query}': {type(e).__name__}: {e}", flush=True)
         return []
 
 
-def find_working_alternative_url(title: str) -> str | None:
-    print(f"[crew] Searching alternative working URL for: '{title}'...")
-    results = search_tavily(title)
-    for res in results:
-        url = res.get("url")
-        if url and url.startswith("http"):
-            if is_url_working(url):
-                print(f"[crew] Found working alternative URL: {url}")
-                return url
-    return None
+def _build_legal_queries(case_context: str, rejection_reason: str) -> list[str]:
+    try:
+        prompt = (
+            "Given this legal case context, generate 3 short UK legal search "
+            "queries (max 8 words each) that would find relevant statutes or "
+            "case law on bailii.org, legislation.gov.uk, gov.uk, or scotcourts.gov.uk. "
+            "Focus on the legal cause of action (e.g. 'employer negligence duty of care', "
+            "'Health and Safety at Work Act', 'PUWER 1998 forklift'), not incident "
+            "narrative details like names, dates, or locations. "
+            "Return ONLY a JSON list of strings, nothing else.\n\n"
+            f"CASE CONTEXT:\n{case_context[:1200]}\n\n"
+            f"REJECTION FEEDBACK:\n{rejection_reason[:400]}"
+        )
+        resp = litellm.completion(
+            model=llm.model if hasattr(llm, "model") else None,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200,
+        )
+        text = resp.choices[0].message.content
+        queries = _try_parse_json(text) or []
+
+        if isinstance(queries, dict):
+            queries = list(queries.values())
+
+        queries = [q for q in queries if isinstance(q, str) and q.strip()]
+        if queries:
+            return queries[:3]
+    except Exception as e:
+        print(f"[crew] LLM query generation failed, falling back to keyword extraction: {e}", flush=True)
+
+    words = [w for w in re.findall(r'\b\w+\b', case_context[:400]) if len(w) > 4]
+    return [
+        " ".join(words[:6]),
+        "UK employer liability negligence breach",
+        "health and safety at work act duty of care",
+    ]
 
 
 def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
-    """
-    Runs a background research crew that conducts adversarial legal research,
-    hunting for precedents, regulatory fines, and court rulings.
-
-    Dynamically fetches:
-      - Vault evidence from the vector store (PDFs, URLs, images)
-      - Attorney rejection feedback from the latest rejected Alert record
-
-    Every finding MUST include an inline citation (URL or docket number).
-    Includes a full Source Index of all sites searched for further reading.
-    Returns a tuple of (strategic_memo_markdown, ai_reasoning) where
-    ai_reasoning is a short explanation of why this result is relevant and
-    how it can help win the case.
-    """
-
-    # -----------------------------------------------------------------------
-    # 1. Fetch vault evidence from the vector store for this case
-    # -----------------------------------------------------------------------
     from .vector_store import search_vector_store
-    vault_chunks = search_vector_store(case_id, case_context, top_k=15)
+    raw_vault_chunks = search_vector_store(case_id, case_context, top_k=15)
+    vault_chunks = _scan_for_contamination(raw_vault_chunks or [], case_id)
     vault_evidence = "\n\n---\n\n".join(vault_chunks) if vault_chunks else "(No vault evidence available)"
 
-    # -----------------------------------------------------------------------
-    # 2. Fetch the latest rejection feedback from the Alert table
-    # -----------------------------------------------------------------------
+    vault_doc_keywords = set()
+    VAULT_DOC_PATTERNS = [
+        "Incident Report", "Maintenance Log", "Policy Extract", "Timeline",
+        "Supervisor Email", "Email Chain", "Teams Conversation", "Training Record",
+        "Benchmark Case Pack", "Case Pack", "Witness Statement", "Risk Assessment",
+        "CCTV", "Medical Report", "Accident Report", "H&S Policy",
+        "Internal Investigation Report",
+    ]
+    for chunk in vault_chunks:
+        for pattern in VAULT_DOC_PATTERNS:
+            if pattern.lower() in chunk.lower():
+                vault_doc_keywords.add(pattern.lower())
+    print(f"[crew] Vault document keywords detected: {vault_doc_keywords}", flush=True)
+
     rejection_reason = ""
     try:
         from sqlmodel import Session, select
@@ -815,272 +733,258 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
             if latest_rejected and latest_rejected.rejection_reason:
                 rejection_reason = latest_rejected.rejection_reason
     except Exception as e:
-        print(f"[crew] Failed to fetch rejection feedback for case {case_id}: {e}")
+        print(f"[crew] Failed to fetch rejection feedback for case {case_id}: {e}", flush=True)
 
-    # -----------------------------------------------------------------------
-    # 3. Build the system prompt sections
-    # -----------------------------------------------------------------------
     rejection_block = ""
     if rejection_reason:
         rejection_block = (
-            "\n\nATTORNEY REJECTION FEEDBACK (MANDATORY — treat as direct order from Managing Partner):\n"
+            "\n\nATTORNEY REJECTION FEEDBACK (MANDATORY):\n"
             f"{rejection_reason}\n\n"
-            "You MUST specifically address this feedback and correct your previous mistakes. "
-            "Pivot your research strategy entirely to satisfy this exact requirement."
+            "You MUST specifically address this feedback."
         )
 
-    # Load Tavily search tool if configured
-    search_tools = []
-    try:
-        from crewai_tools import TavilySearchResults
-        search_tools = [TavilySearchResults(
-            include_domains=[
-                "bailii.org",
-                "legislation.gov.uk",
-                "scotcourts.gov.uk",
-                "gov.uk",
-            ]
-        )]
-    except Exception:
-        try:
-            from langchain_tavily import TavilySearch
-            from crewai.tools import tool as crewai_tool
-            _tavily = TavilySearch(
-                max_results=5,
-                include_domains=[
-                    "bailii.org",
-                    "legislation.gov.uk",
-                    "scotcourts.gov.uk",
-                    "gov.uk",
-                ],
+    verified_web_evidence = []
+    verified_search_urls = set()
+
+    queries_to_try = _build_legal_queries(case_context, rejection_reason)
+    print(f"[crew] Generated {len(queries_to_try)} search queries: {queries_to_try}", flush=True)
+
+    raw_tavily_results = []
+    seen_urls: set[str] = set()
+    MAX_HITS_PER_QUERY = 3
+
+    for query in queries_to_try:
+        print(f"[crew] Running pre-search query: '{query}'", flush=True)
+        hits = search_tavily(query)
+        print(f"[crew] Query '{query}' returned {len(hits)} whitelisted hits", flush=True)
+
+        new_hits_count = 0
+        for hit in hits[:MAX_HITS_PER_QUERY]:
+            url = hit.get("url", "")
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                raw_tavily_results.append(hit)
+                new_hits_count += 1
+        print(f"[crew]   -> {new_hits_count} new unique URLs added", flush=True)
+
+    if not raw_tavily_results:
+        print("[crew] Initial queries returned 0 hits. Running broad UK legal fallback queries...", flush=True)
+        fallback_queries = [
+            "UK employer liability negligence breach legislation.gov.uk",
+            "health and safety at work act duty of care legislation.gov.uk",
+            "Provision and Use of Work Equipment Regulations PUWER legislation.gov.uk"
+        ]
+        for fq in fallback_queries:
+            print(f"[crew] Running fallback query: '{fq}'", flush=True)
+            hits = search_tavily(fq)
+            print(f"[crew] Fallback query '{fq}' returned {len(hits)} whitelisted hits", flush=True)
+            for hit in hits[:2]:
+                url = hit.get("url", "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    raw_tavily_results.append(hit)
+
+    whitelisted_hits = [r for r in raw_tavily_results if r.get("url") and _is_allowed_domain(r["url"])]
+
+    if whitelisted_hits:
+        print(
+            f"[crew] {len(whitelisted_hits)} whitelisted hits before reachability check: "
+            f"{[h['url'] for h in whitelisted_hits]}",
+            flush=True,
+        )
+        urls_to_verify = [r["url"] for r in whitelisted_hits]
+        reachability_map = verify_urls_in_parallel(urls_to_verify)
+
+        for hit in whitelisted_hits:
+            u = hit["url"]
+            if reachability_map.get(u, False):
+                verified_search_urls.add(u)
+                verified_web_evidence.append({
+                    "title": hit.get("title", "Legal Source"),
+                    "url": u,
+                    "snippet": hit.get("content", "")
+                })
+            else:
+                print(f"[crew] Pre-search discarded UNREACHABLE url: {u}", flush=True)
+
+    if verified_web_evidence:
+        web_evidence_parts = []
+        for idx, item in enumerate(verified_web_evidence, start=1):
+            web_evidence_parts.append(
+                f"[Web Source {idx}]\nTitle: {item['title']}\nURL: {item['url']}\nSnippet: {item['snippet']}"
             )
+        web_evidence_block = "\n\n".join(web_evidence_parts)
+    else:
+        web_evidence_block = "No authoritative legal sources were located on bailii.org, legislation.gov.uk, gov.uk or scotcourts.gov.uk."
 
-            @crewai_tool("Tavily Web Search")
-            def tavily_search(query: str) -> str:
-                """Search the web for legal information using Tavily."""
-                return str(_tavily.invoke(query))
-
-            search_tools = [tavily_search]
-        except Exception:
-            pass
-
-    evidence_hunter = Agent(
-        role="Lexis Forensic Legal Evidence Hunter",
-        goal=(
-            "Search public legal precedents, regulatory filings, and internal client evidence (VAULT EVIDENCE) "
-            "to gather all relevant legal citations, fines, and liabilities related to the case."
-        ),
-        backstory=(
-            "You are an elite forensic legal evidence hunter. You excel at searching online databases, "
-            "dockets, BAILII, and news archives to extract hard facts, dates, and litigation precedents.\n\n"
-            "EVIDENCE SYNTHESIS PROTOCOL:\n"
-            "Read the VAULT EVIDENCE and connect it directly to the CASE CONTEXT. Look for timelines, "
-            "physical evidence, and contradictions. The smoking guns are in the vault.\n\n"
-            "ZERO HALLUCINATION PROTOCOL:\n"
-            "Never invent case law, citations, or URLs. If a citation cannot be verified, do not include it."
-        ),
-        llm=llm,
-        tools=search_tools,
-        verbose=True,
-        max_iter=5,
+    verified_evidence_text = (
+        f"--- VERIFIED OFFICIAL LEGAL SEARCH RESULTS (BAILII/GOV.UK/LEGISLATION.GOV.UK) ---\n"
+        f"{web_evidence_block}\n\n"
+        f"--- VAULT EVIDENCE (CLIENT PDFs & DOCUMENTS) ---\n"
+        f"{vault_evidence[:2000]}"
     )
+
+    print(f"[crew] Pre-search complete. Verified URLs passed to LLM: {list(verified_search_urls)}", flush=True)
+    print(f"[crew] Total verified web evidence items: {len(verified_web_evidence)}", flush=True)
 
     legal_strategist = Agent(
         role="Lexis Senior Civil Litigation Strategist",
         goal=(
-            "Synthesize gathered legal evidence and internal context into a highly structured, "
+            "Synthesize verified legal evidence and internal context into a highly structured, "
             "strategic legal memo for the Managing Partner."
         ),
         backstory=(
-            "You are an expert civil litigation strategist and Senior Partner. You take raw evidence, "
+            "You are an expert civil litigation strategist and Senior Partner. You take provided evidence, "
             "identify key liability vulnerabilities, analyze defense arguments, determine settlement triggers, "
             "and format all information into the required schema."
         ),
         llm=llm,
-        tools=[],  # Strictly NO tools to prevent parser conflicts with output_pydantic
+        tools=[],
         verbose=True,
         max_iter=3,
-    )
-
-    evidence_gathering_task = Task(
-        description=(
-            "SYSTEM ROLE: You are an elite Forensic Legal Evidence Hunter.\n\n"
-            f"CASE CONTEXT (original attorney notes — DO NOT modify):\n{case_context[:800]}\n\n"
-            f"VAULT EVIDENCE (extracted text from uploaded PDFs, OCR descriptions of images, "
-            f"and scraped URLs — treat as absolute verified fact):\n{vault_evidence[:3000]}\n\n"
-            f"{rejection_block}\n\n"
-            "CORE DIRECTIVES:\n\n"
-            "1. EVIDENCE SYNTHESIS: Read the VAULT EVIDENCE and connect it directly to the CASE CONTEXT. "
-            "Look for hard timelines, physical evidence, and contradictions.\n\n"
-            "2. ZERO HALLUCINATION: You are strictly prohibited from inventing case law, citations, or URLs. "
-            "If you cannot verify a specific case name, year, and court, do not include it.\n\n"
-            "3. CIVIL LAW COMPLIANCE: Apply 'balance of probabilities'. Do NOT cite Criminal Court cases "
-            "(e.g., 'Crim', 'R v.') as civil precedents.\n\n"
-            "4. CRIMINAL LEVERAGE EXCEPTION: You may cite criminal statutes ONLY under a separate "
-            "'CRIMINAL LEVERAGE OPPORTUNITIES' heading, noting they establish grounds for a police "
-            "report to accelerate a civil settlement.\n\n"
-            "5. Use your Tavily Web Search tool to locate real legal findings.\n\n"
-            "Provide a comprehensive, detailed report listing all findings, case law, statutes, and their corresponding URLs or source details."
-        ),
-        expected_output="A detailed, unstructured report listing all legal precedents, regulatory fines, findings, and their source URLs.",
-        agent=evidence_hunter,
     )
 
     strategy_generation_task = Task(
         description=(
             "SYSTEM ROLE: You are a Senior Civil Litigation Strategist.\n\n"
             f"CASE CONTEXT:\n{case_context[:800]}\n\n"
-            f"VAULT EVIDENCE:\n{vault_evidence[:3000]}\n\n"
-            "You are provided with the raw RESEARCH FINDINGS from the previous task. Your goal is to structure this into a high-level strategic memo.\n\n"
-            "CORE DIRECTIVES:\n\n"
-            "1. LIABILITY SUMMARY: Provide a detailed, professional summary of actual legal liabilities and insights found (strictly no disclaimers or simulated text).\n\n"
-            "   CRITICAL OUTPUT RULES (ZERO-HALLUCINATION ENFORCED):\n"
-            "   - MANDATORY EVIDENCE LINKING: Every claim in the 'liability_summary' MUST include a reference to an item in the 'evidence_log'. If you cannot link a claim to evidence, do not write it.\n"
-            "   - NO GENERIC FILLER: Absolutely ban phrases like 'The defendant...' or generic liability claims if you do not have specific, evidence-backed proof of the defendant's specific action. If evidence is missing, state: 'Insufficient evidence to determine [X]'.\n"
-            "   - SOURCE VERIFICATION: You are only allowed to cite cases and statutes found in the provided raw RESEARCH FINDINGS. If you mention a case not present in the provided findings, you are hallucinating. Strictly no simulated cases or fake URLs.\n\n"
-            "2. EVIDENCE LOG: Convert the research findings into a list of structured evidence items. Each item must have a real title, detailed summary, full complete source URL, and type.\n\n"
-            "3. TACTICAL LEVERAGE ANALYSIS (leverage_strategy):\n"
-            "   - settlement_trigger: The single most powerful fact from the Evidence Log creating maximum settlement pressure.\n"
-            "   - barriers_to_defense: The opponent's most likely defense and the direct counter-argument.\n"
-            "   - next_tactical_move: The exact recommended next step to force a win.\n\n"
-            "4. SOURCE INDEX: A list of all unique source URLs cited in the evidence log.\n\n"
-            "CONSTRAINT: Always prioritize valid JSON/Format output. Do not include conversational filler."
+            f"VERIFIED EVIDENCE BLOCK:\n{verified_evidence_text}\n\n"
+            f"{rejection_block}\n\n"
+            "AUTHORITATIVE EVIDENCE BOUNDARY & ZERO-KNOWLEDGE DIRECTIVE:\n"
+            "1. MANDATORY HYBRID EVIDENCE MIX: Your evidence_log MUST contain BOTH internal Vault evidence AND "
+            "official Web Search evidence IF web search items are present in the VERIFIED EVIDENCE BLOCK above. "
+            "If web search items are present, you MUST include AT LEAST 2 of them, copying their exact 'http...' "
+            "URLs as source_url. If NO web search items are present, proceed with vault-only evidence.\n"
+            "2. MANDATORY EVIDENCE LINKING: Every claim or statute mentioned in liability_summary MUST be "
+            "supported by an item in evidence_log.\n"
+            "3. ZERO HALLUCINATION: You are strictly forbidden from inventing URLs or citing sources outside "
+            "the VERIFIED EVIDENCE BLOCK.\n"
+            "4. SOURCE URL FORMATTING RULES:\n"
+            "   - For Web Search items: copy the exact 'http...' URL from the search result snippet verbatim.\n"
+            "   - For internal Vault documents: use the clean document name (e.g. 'Benchmark Case Pack.pdf' or "
+            "'Incident Report') as source_url. Do NOT invent website domains for Vault documents.\n"
+            "5. BE CONCISE: Keep liability_summary, settlement_trigger, barriers_to_defense, and "
+            "next_tactical_move each under 80 words. Complete every sentence — never end a field mid-sentence.\n\n"
+            "STRUCTURED SECTIONS TO PRODUCE:\n"
+            "1. LIABILITY SUMMARY\n2. EVIDENCE LOG\n3. TACTICAL LEVERAGE ANALYSIS (leverage_strategy)\n"
+            "4. SOURCE INDEX\n\n"
+            "CONSTRAINT: Return valid, complete JSON matching the ResearchOutput schema. Never truncate."
         ),
         expected_output=(
-            "A structured JSON object matching the ResearchOutput schema containing:\n"
-            "1. liability_summary: A detailed, professional summary of actual legal liabilities and insights found (strictly no disclaimers or simulated text).\n"
-            "2. evidence_log: A list of actual evidence items found, each with a real title, detailed summary, full complete source URL, and type.\n"
-            "3. leverage_strategy: An object with three fields — settlement_trigger (the single most powerful fact creating settlement pressure), barriers_to_defense (the opponent's likely defense and the direct counter-argument), and next_tactical_move (the exact recommended next step to force a win).\n"
-            "4. source_index: A complete list of all unique, real URLs found during the web search."
+            "A structured JSON object matching the ResearchOutput schema. All string fields must be "
+            "complete sentences, none cut off mid-word."
         ),
         agent=legal_strategist,
         output_pydantic=ResearchOutput,
     )
 
     crew = Crew(
-        agents=[evidence_hunter, legal_strategist],
-        tasks=[evidence_gathering_task, strategy_generation_task],
+        agents=[legal_strategist],
+        tasks=[strategy_generation_task],
         process=Process.sequential,
         verbose=True,
-        max_rpm=10,
     )
 
-    import time
-    
     max_retries = 3
-    retry_delay = 65  # Mistral's rate limit resets every minute, wait a bit longer to be safe
-    
+    retry_delay = 65
+
     result = None
     for attempt in range(max_retries):
         try:
             result = crew.kickoff()
-            break  # Success
+            break
         except Exception as e:
             if "RateLimitError" in str(e) or "429" in str(e):
                 if attempt < max_retries - 1:
-                    print(f"\\n[crew] Rate limit hit (429). Waiting {retry_delay} seconds before attempt {attempt + 2}/{max_retries}...")
+                    print(f"\n[crew] Rate limit hit (429). Waiting {retry_delay}s before attempt {attempt + 2}/{max_retries}...", flush=True)
                     time.sleep(retry_delay)
                     continue
-            # Re-raise if it's not a rate limit error or we ran out of retries
             raise
-
-    # ---------------------------------------------------------------------------
-    # Model-agnostic output parsing
-    #
-    # Different LLMs return structured output in wildly different wrappers:
-    #   - Clean Pydantic object (ideal)
-    #   - Raw JSON string
-    #   - JSON inside markdown ```json ... ``` blocks
-    #   - "Final Answer": "{...}" (Gemma, Nemotron, smaller models)
-    #   - "Final Answer": { ... }  (dict, not string)
-    #   - Outer wrapper like {"ResearchOutput": {...}}
-    #
-    # The parser below tries every extraction strategy in order so that
-    # switching models never breaks the formatted output.
-    # ---------------------------------------------------------------------------
-    import json
-    import re
 
     output_obj = None
     raw_dict = None
 
-    # Strategy 1: CrewAI successfully parsed into Pydantic
     if hasattr(result, 'pydantic') and result.pydantic:
         output_obj = result.pydantic
     else:
         raw_text = str(result).strip()
         parsed = _extract_json_from_raw_text(raw_text)
-
         if parsed:
             raw_dict = parsed
             output_obj = _normalize_to_research_output(parsed)
+        elif raw_text and raw_text.count("{") > raw_text.count("}"):
+            print(
+                "[crew] Output appears to be truncated JSON (unbalanced braces) and "
+                "could not be parsed at all. Check max_tokens ceiling in get_crew_llm().",
+                flush=True,
+            )
 
     if output_obj:
-        print("[crew] Verifying URLs in parallel...")
-        urls_to_check = []
+        verified_evidence = []
         for item in output_obj.evidence_log:
             url = item.source_url.strip()
             if url and url.startswith("http"):
-                urls_to_check.append(url)
-        for url in output_obj.source_index:
-            url = url.strip()
-            if url and url.startswith("http"):
-                urls_to_check.append(url)
-                
-        # Run parallel verification
-        verification_results = verify_urls_in_parallel(urls_to_check)
-        
-        repaired_urls = {}
-        
-        # Apply results to evidence_log
-        for item in output_obj.evidence_log:
-            url = item.source_url.strip()
-            if url and url.startswith("http"):
-                is_working = verification_results.get(url, False)
-                if not is_working:
-                    # Let's dynamically find a working replacement URL!
-                    alternative_url = find_working_alternative_url(item.title)
-                    if alternative_url:
-                        print(f"[crew] Successfully repaired broken URL. Replaced '{url}' with '{alternative_url}'")
-                        item.source_url = alternative_url
-                        repaired_urls[url] = alternative_url
-                        verification_results[alternative_url] = True
-                    else:
-                        print(f"[crew] No working alternative URL found for: '{item.title}'. Replacing with placeholder.")
-                        item.source_url = "URL: Available upon request from court records"
-                        
-        # Apply results to source_index
-        verified_index = []
-        for url in output_obj.source_index:
-            url = url.strip()
-            # If this URL was repaired, check the alternative
-            if url in repaired_urls:
-                verified_index.append(repaired_urls[url])
-                continue
-                
-            if url and url.startswith("http"):
-                if verification_results.get(url, False):
-                    verified_index.append(url)
+                if _is_allowed_domain(url):
+                    verified_evidence.append(item)
                 else:
-                    print(f"[crew] Removing broken URL from source_index: {url}")
+                    print(f"[crew] Discarding non-whitelisted domain URL: '{item.title}' (URL: {url})", flush=True)
             else:
-                verified_index.append(url)
-                
-        # Also, make sure any newly added alternative URL is listed in the source_index if not already
-        for alt_url in repaired_urls.values():
-            if alt_url not in verified_index:
-                verified_index.append(alt_url)
-                
-        output_obj.source_index = list(set(verified_index))
+                # Retain all non-http vault evidence items
+                verified_evidence.append(item)
 
-    # Extract the ai_reasoning before formatting. Use the liability_summary
-    # because it's the high-level "why this matters" paragraph — exactly what
-    # we want to surface in the Brain icon hover popup.
+        output_obj.evidence_log = verified_evidence
+        print(f"[crew] Evidence log filtered: {len(verified_evidence)} items kept", flush=True)
+
+        valid_sources = set(verified_search_urls)
+        for item in output_obj.evidence_log:
+            url = item.source_url.strip()
+            if url and not url.startswith("http"):
+                clean_ref = _clean_vault_reference(url)
+                if clean_ref:
+                    valid_sources.add(url)
+
+        output_obj.source_index = list(valid_sources)
+        print(f"[crew] Programmatic source_index set: {output_obj.source_index}", flush=True)
+
     if output_obj:
         memo_text = _format_research_output(output_obj)
         ai_reasoning = output_obj.liability_summary or ""
     elif raw_dict:
+        raw_evidence = raw_dict.get("evidence_log", [])
+        verified_raw_evidence = []
+        for item in raw_evidence:
+            if isinstance(item, dict):
+                item_url = str(item.get("source_url", "")).strip()
+                item_title = str(item.get("title", "")).lower()
+                if item_url.startswith("http"):
+                    if _is_allowed_domain(item_url) and item_url in verified_search_urls:
+                        verified_raw_evidence.append(item)
+                    else:
+                        print(f"[crew] Discarding raw_dict evidence: '{item.get('title')}' (URL: {item_url})", flush=True)
+                elif item_url:
+                    cleaned = _clean_vault_reference(item_url).lower()
+                    is_known_vault = any(keyword in cleaned or keyword in item_title for keyword in vault_doc_keywords)
+                    if is_known_vault:
+                        verified_raw_evidence.append(item)
+                    else:
+                        print(f"[crew] Discarding raw_dict evidence (not in vault): '{item.get('title')}' (source: {item_url})", flush=True)
+        raw_dict["evidence_log"] = verified_raw_evidence
+        raw_dict["source_index"] = list(verified_search_urls)
+        print(f"[crew] raw_dict filtered: {len(verified_raw_evidence)} evidence items, source_index: {raw_dict['source_index']}", flush=True)
+
         memo_text = _format_raw_research_dict(raw_dict)
+
+        source_lines = ["\n### Source Index"]
+        for url in raw_dict["source_index"]:
+            url_clean = url.strip()
+            if url_clean.startswith("http"):
+                source_lines.append(f"- [{url_clean}]({url_clean})")
+            else:
+                clean_name = _clean_vault_reference(url_clean)
+                if clean_name:
+                    source_lines.append(f"- 📄 {clean_name}")
+        memo_text += "\n".join(source_lines)
+
         raw_summary = raw_dict.get("liability_summary", "")
         if isinstance(raw_summary, dict):
             ai_reasoning = _flatten_liability_summary(raw_summary)
@@ -1090,71 +994,7 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
         memo_text = str(result)
         ai_reasoning = ""
 
-    # Safety Net: remove any simulated research disclaimers or tool note lines
-    disclaimer_phrases = [
-        "This memo is based on simulated research",
-        "simulated research due to tool limitations",
-        "Links are AI-generated",
-        "execute the Tavily Web Search queries",
-        "Would you like me to run these queries now",
-        "Proceed or refine the scope",
-        "Tavily Web Search actions",
-        "disclaimer"
-    ]
-    
-    cleaned_lines = []
-    in_table = False
-    headers = []
-    
-    for line in memo_text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            cleaned_lines.append(line)
-            continue
-            
-        if any(phrase.lower() in stripped.lower() for phrase in disclaimer_phrases):
-            continue
-            
-        # Check if line is a markdown table row (starts and ends with |)
-        if stripped.startswith("|") and stripped.endswith("|"):
-            parts = [p.strip() for p in stripped.split("|")[1:-1]]
-            # Skip separator rows like |---|---|
-            if all(all(c == '-' or c == ' ' or c == ':' for c in p) for p in parts if p):
-                continue
-            
-            # Check if this is the header row
-            if any(term in parts[0].lower() for term in ["description", "source", "case name", "pacer link"]):
-                headers = parts
-                in_table = True
-                continue
-                
-            # If we are in a table and have valid parsed columns
-            if in_table and len(parts) >= 2:
-                desc = parts[0]
-                source = parts[1]
-                
-                # Format beautifully as text blocks to prevent card overflow
-                desc_clean = desc.replace("**", "").replace("*", "").strip()
-                source_clean = source.replace("[", "").replace("]", "").replace("(#)", "").strip()
-                
-                # If there's an actual URL in the source, extract it
-                if "http" in source_clean:
-                    import re
-                    urls = re.findall(r'https?://[^\s|\)]+', source_clean)
-                    url = urls[0] if urls else source_clean
-                    cleaned_lines.append(f"\n- **{desc_clean}**")
-                    cleaned_lines.append(f"  [Source]({url})")
-                else:
-                    # Skip empty placeholder rows or rows with only '#' as links
-                    if source_clean == "#" or not source_clean:
-                        continue
-                    cleaned_lines.append(f"\n- **{desc_clean}**")
-                    if source_clean:
-                        cleaned_lines.append(f"  Source: {source_clean}")
-            continue
-        else:
-            in_table = False
-            cleaned_lines.append(line)
+    for marker in _CONTAMINATION_MARKERS:
+        memo_text = re.sub(re.escape(marker), "", memo_text, flags=re.IGNORECASE)
 
-    return "\n".join(cleaned_lines).strip(), ai_reasoning
- 
+    return memo_text.strip(), ai_reasoning

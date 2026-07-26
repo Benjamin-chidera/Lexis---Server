@@ -8,7 +8,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 load_dotenv()
 
 from ai.vector_store import get_vector_store, search_vector_store
-from langchain_core.documents import Document
+from langchain_core.documents import Document 
 
 try:
     print("Testing Pinecone connection and case isolation...")

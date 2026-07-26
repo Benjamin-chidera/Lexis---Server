@@ -20,6 +20,9 @@ services:
       - REDIS_URL=redis://redis:6379
       - ENVIRONMENT=development
       - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse-server:3000}
+    volumes:
+      - .:/app
+      - /app/.venv
     depends_on:
       - redis
 
@@ -32,6 +35,9 @@ services:
       - REDIS_URL=redis://redis:6379
       - ENVIRONMENT=development
       - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse-server:3000}
+    volumes:
+      - .:/app
+      - /app/.venv
     depends_on:
       - redis
 

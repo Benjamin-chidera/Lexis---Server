@@ -52,12 +52,9 @@ jobs:
       - name: Validate and set Docker namespace
         id: set-namespace
         run: |
-          NAMESPACE="${{ vars.DOCKERHUB_USERNAME }}"
+          NAMESPACE="${{ secrets.DOCKERHUB_USERNAME }}"
           if [ -z "$NAMESPACE" ]; then
-            NAMESPACE="${{ secrets.DOCKERHUB_USERNAME }}"
-          fi
-          if [ -z "$NAMESPACE" ]; then
-            echo "::error::Docker namespace is empty. Please set DOCKERHUB_USERNAME under either Actions Secrets or Repository Variables."
+            echo "::error::Docker namespace is empty. Please set DOCKERHUB_USERNAME under Actions Secrets."
             exit 1
           fi
           echo "namespace=$NAMESPACE" >> $GITHUB_OUTPUT

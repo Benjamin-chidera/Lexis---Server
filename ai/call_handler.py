@@ -29,7 +29,7 @@ from mistralai.client import Mistral
 from sqlmodel import Session, select
 
 from database import engine
-from models import Case, CaseMessage
+from models import Case, CaseMessage, Alert
 
 load_dotenv()
 
@@ -62,9 +62,10 @@ RULES FOR VOICE RESPONSES:
 - Use transitional phrases like "So basically...", "The key issue here is...", "What I'm seeing is..."
 
 TRIGGERING BACKGROUND RESEARCH:
-- If the user explicitly asks or commands you to "run research", "do some research", "start background research", "start another research", or similar, you MUST trigger the background research job.
-- To do this, simply append the exact token '[TRIGGER_RESEARCH]' at the very end of your response text (e.g., 'I will start that background research right now. [TRIGGER_RESEARCH]').
-- Explain conversationally that you are starting the background research crew and that you'll let them know the moment you find anything. Keep it natural!
+- Always check the CASE CONTEXT & RESEARCH STATUS section first. If the user's query can be fully answered using the current documents or previous research findings, do NOT trigger a new research job.
+- Triggering Decision Rules:
+  1. Clear Need (Trigger Autonomously): If the user introduces new case facts/context, uploads new files, or raises a completely new legal issue not covered in the current context/alerts, autonomously trigger the research crew (append '[TRIGGER_RESEARCH]' to the very end of your response text) and state conversationally that you are spinning up the background research crew.
+  2. Borderline / Follow-up (Ask User): If the query could benefit from broader web/precedent research but is not strictly necessary to answer the immediate question, suggest it by asking (e.g., "Would you like me to start background research to investigate this further?"). Do NOT append '[TRIGGER_RESEARCH]' in this case; wait for their confirmation.
 """
 
 
@@ -165,6 +166,20 @@ class CallSession:
             urls = json.loads(urls_raw)
             if urls:
                 context_parts.append(f"Reference URLs: {', '.join(urls)}")
+
+            # Add latest background research findings (Alerts)
+            alerts = session.exec(
+                select(Alert).where(Alert.case_id == self.case_id).order_by(Alert.created_at.desc()).limit(3)
+            ).all()
+            if alerts:
+                research_parts = []
+                for idx, alert in enumerate(alerts):
+                    research_parts.append(
+                        f"Research Finding {idx+1}: {alert.title}\n"
+                        f"Summary: {alert.summary}\n"
+                        f"AI Reasoning: {alert.ai_reasoning or 'None'}"
+                    )
+                context_parts.append("Latest Background Research Findings:\n" + "\n\n".join(research_parts))
 
             return "\n\n".join(context_parts) if context_parts else "No case context available."
 

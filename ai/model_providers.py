@@ -14,7 +14,7 @@ from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
 from langchain_nvidia_ai_endpoints import ChatNVIDIA, NVIDIAEmbeddings
 import os
 from dotenv import load_dotenv
-
+ 
 load_dotenv() 
 
 # Map NVIDIA_API_KEY to NVIDIA_NIM_API_KEY so LiteLLM/CrewAI can authenticate correctly
@@ -27,7 +27,7 @@ if os.getenv("NVIDIA_API_KEY") and not os.getenv("NVIDIA_NIM_API_KEY"):
 # Must be pulled in Ollama: ollama pull granite3.2-vision:latest
 # CHAT_MODEL_NAME = "granite3.2-vision:latest"
 
-# MODEL = "gpt-4-turbo"
+# MODEL = "gpt-4-turbo" 
 # MODEL = "granite3.2-vision:latest"
 # MODEL = "mistral-large-latest"
 # MODEL = "mistral-small-latest"
@@ -92,5 +92,6 @@ def get_crew_llm(timeout=1200):
     return LLM(
         model=f"nvidia_nim/{MODEL}",
         api_key=os.getenv("NVIDIA_API_KEY"),
-        timeout=timeout
+        timeout=timeout,
+        max_tokens=8192,
     )

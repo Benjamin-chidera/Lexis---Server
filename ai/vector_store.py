@@ -17,9 +17,9 @@ from .model_providers import get_embeddings
 from .image_handler import describe_image
 
 # Pinecone Index name
-PINECONE_INDEX_NAME = "lexis-vector"
+PINECONE_INDEX_NAME = "lexis-vector" 
 
-# Text chunking settings
+# Text chunking settings 
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
 
