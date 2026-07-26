@@ -95,7 +95,7 @@ jobs:
             -H 'x-api-key: ${{ secrets.DOKPLOY_API_KEY }}' \
             -H 'Content-Type: application/json' \
             --connect-timeout 10 \
-            --max-time 30 \
+            --max-time 600 \
             -d '{
               "applicationId": "${{ secrets.DOKPLOY_APP_ID }}"
             }')
