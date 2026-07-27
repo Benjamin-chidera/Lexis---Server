@@ -102,16 +102,44 @@ def _is_allowed_domain(url: str) -> bool:
         return False
 
 
+def _strip_non_whitelisted_urls(text: str) -> str:
+    """
+    Removes any URL from free text that does not belong to ALLOWED_DOMAINS.
+    This is the last-resort sanitizer for raw LLM output that bypasses
+    structured parsing — it prevents hallucinated URLs from reaching the user.
+    """
+    import re as _re
+    url_pattern = _re.compile(r'https?://[^\s)\]>"]+', _re.IGNORECASE)
+
+    def _replace_if_blocked(match: _re.Match) -> str:
+        url = match.group(0)
+        if _is_allowed_domain(url):
+            return url
+        return "[URL removed — not from an authoritative legal source]"
+
+    return url_pattern.sub(_replace_if_blocked, text)
+
+
 class EvidenceItem(BaseModel):
     title: str = Field(description="Short title of the finding")
     summary: str = Field(description="Complete, detailed summary of why this is relevant to the case")
-    source_url: str = Field(
+    evidence_type: str = Field(
+        description="Source type: 'URL' for web search, or 'PDF Record' / 'Witness Statement' / 'Maintenance Log' / 'Policy Extract' for internal vault documents"
+    )
+    web_url: str | None = Field(
+        default=None,
         description=(
-            "The exact URL starting with https:// for web search items, "
-            "or the document name (e.g. 'Benchmark Case Pack.pdf') for internal vault documents."
+            "The exact whitelisted URL starting with https:// for external web search items. "
+            "MUST be null/empty if this evidence item comes from an internal Vault document."
         )
     )
-    evidence_type: str = Field(description="One of: URL, PDF Record, Court Docket, Media/Image")
+    document_name: str | None = Field(
+        default=None,
+        description=(
+            "The exact filename or title of the internal document (e.g., 'Witness Statement - Sarah Jenkins', "
+            "'Maintenance Log FLT-04.pdf'). MUST be null/empty if this evidence item comes from a web search."
+        )
+    )
 
 
 class LeverageStrategy(BaseModel):
@@ -307,11 +335,17 @@ def _format_research_output(output: "ResearchOutput") -> str:
         lines.append(f"\n#### [{item.evidence_type}] {item.title}")
         lines.append(f"{item.summary}")
 
-        source_url = item.source_url.strip()
-        if source_url.startswith("http"):
-            lines.append(f"[Source]({source_url})")
-        else:
-            clean_name = _clean_vault_reference(source_url)
+        url = (item.web_url or "").strip()
+        doc = (item.document_name or "").strip()
+
+        if url and url.startswith("http"):
+            # Final rendering gate: only render URLs from whitelisted domains
+            if _is_allowed_domain(url):
+                lines.append(f"[Source]({url})")
+            else:
+                print(f"[crew] _format_research_output: blocked non-whitelisted URL: {url}", flush=True)
+        elif doc:
+            clean_name = _clean_vault_reference(doc)
             if clean_name:
                 lines.append(f"📄 Source: {clean_name}")
 
@@ -326,7 +360,11 @@ def _format_research_output(output: "ResearchOutput") -> str:
     for url in output.source_index:
         url_clean = url.strip()
         if url_clean.startswith("http"):
-            lines.append(f"- [{url_clean}]({url_clean})")
+            # Final rendering gate: only render whitelisted domain URLs in the source index
+            if _is_allowed_domain(url_clean):
+                lines.append(f"- [{url_clean}]({url_clean})")
+            else:
+                print(f"[crew] _format_research_output source_index: blocked non-whitelisted URL: {url_clean}", flush=True)
         else:
             clean_name = _clean_vault_reference(url_clean)
             if clean_name:
@@ -356,15 +394,23 @@ def _format_raw_research_dict(data: dict) -> str:
                 evidence_type = item.get("evidence_type", item.get("type", "Evidence"))
                 title = item.get("title", "Untitled")
                 item_summary = item.get("summary", "")
-                url = str(item.get("source_url", ""))
+                url = str(item.get("web_url") or item.get("source_url") or "").strip()
+                doc = str(item.get("document_name") or "").strip()
+                if not doc and url and not url.startswith("http"):
+                    doc = url
+                    url = ""
 
                 lines.append(f"\n#### [{evidence_type}] {title}")
                 if item_summary:
                     lines.append(f"{item_summary}")
                 if url and url.startswith("http"):
-                    lines.append(f"[Source]({url})")
-                elif url:
-                    clean_name = _clean_vault_reference(url)
+                    # Final rendering gate: only render whitelisted domain URLs
+                    if _is_allowed_domain(url):
+                        lines.append(f"[Source]({url})")
+                    else:
+                        print(f"[crew] _format_raw_research_dict: blocked non-whitelisted URL: {url}", flush=True)
+                elif doc:
+                    clean_name = _clean_vault_reference(doc)
                     if clean_name:
                         lines.append(f"📄 Source: {clean_name}")
             else:
@@ -533,15 +579,15 @@ def _normalize_to_research_output(parsed: dict) -> "ResearchOutput | None":
                     if "evidence_type" not in item and "type" in item:
                         item["evidence_type"] = item.pop("type")
                     if "evidence_type" not in item:
-                        item_url = str(item.get("source_url", item.get("url", "")))
+                        item_url = str(item.get("web_url") or item.get("source_url") or item.get("url") or "")
                         item["evidence_type"] = "URL" if item_url.startswith("http") else "PDF Record"
 
-                    if "source_url" not in item and "url" in item:
-                        item["source_url"] = item.pop("url")
-                    if "source_url" not in item and "link" in item:
-                        item["source_url"] = item.pop("link")
-                    if "source_url" not in item:
-                        item["source_url"] = ""
+                    # Normalize URL and document_name fields
+                    raw_src = str(item.pop("source_url", item.pop("url", item.pop("link", "")))).strip()
+                    if "web_url" not in item and raw_src.startswith("http"):
+                        item["web_url"] = raw_src
+                    elif "document_name" not in item and raw_src and not raw_src.startswith("http"):
+                        item["document_name"] = raw_src
 
         if "source_index" not in normalized and "sources" in normalized:
             normalized["source_index"] = normalized.pop("sources")
@@ -847,32 +893,18 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
     strategy_generation_task = Task(
         description=(
             "SYSTEM ROLE: You are a Senior Civil Litigation Strategist.\n\n"
-            f"CASE CONTEXT:\n{case_context[:800]}\n\n"
+            f"CASE CONTEXT:\n{case_context[:1200]}\n\n"
             f"VERIFIED EVIDENCE BLOCK:\n{verified_evidence_text}\n\n"
             f"{rejection_block}\n\n"
-            "AUTHORITATIVE EVIDENCE BOUNDARY & ZERO-KNOWLEDGE DIRECTIVE:\n"
-            "1. MANDATORY HYBRID EVIDENCE MIX: Your evidence_log MUST contain BOTH internal Vault evidence AND "
-            "official Web Search evidence IF web search items are present in the VERIFIED EVIDENCE BLOCK above. "
-            "If web search items are present, you MUST include AT LEAST 2 of them, copying their exact 'http...' "
-            "URLs as source_url. If NO web search items are present, proceed with vault-only evidence.\n"
-            "2. MANDATORY EVIDENCE LINKING: Every claim or statute mentioned in liability_summary MUST be "
-            "supported by an item in evidence_log.\n"
-            "3. ZERO HALLUCINATION: You are strictly forbidden from inventing URLs or citing sources outside "
-            "the VERIFIED EVIDENCE BLOCK.\n"
-            "4. SOURCE URL FORMATTING RULES:\n"
-            "   - For Web Search items: copy the exact 'http...' URL from the search result snippet verbatim.\n"
-            "   - For internal Vault documents: use the clean document name (e.g. 'Benchmark Case Pack.pdf' or "
-            "'Incident Report') as source_url. Do NOT invent website domains for Vault documents.\n"
-            "5. BE CONCISE: Keep liability_summary, settlement_trigger, barriers_to_defense, and "
-            "next_tactical_move each under 80 words. Complete every sentence — never end a field mid-sentence.\n\n"
-            "STRUCTURED SECTIONS TO PRODUCE:\n"
-            "1. LIABILITY SUMMARY\n2. EVIDENCE LOG\n3. TACTICAL LEVERAGE ANALYSIS (leverage_strategy)\n"
-            "4. SOURCE INDEX\n\n"
-            "CONSTRAINT: Return valid, complete JSON matching the ResearchOutput schema. Never truncate."
+            "INSTRUCTIONS & EVIDENCE GUIDELINES:\n"
+            "1. Synthesize the provided VERIFIED EVIDENCE BLOCK into a comprehensive, strategic legal memo for the Managing Partner.\n"
+            "2. Fill the `evidence_log` with all relevant findings from the VERIFIED EVIDENCE BLOCK above.\n"
+            "3. For Web Search items: copy the exact https:// URL from the search snippet into `web_url` and leave `document_name` as null.\n"
+            "4. For internal Vault documents: put the document title/filename (e.g. 'Witness Statement - Sarah Jenkins', 'Maintenance Log FLT-04') into `document_name` and leave `web_url` as null. Never invent fake URLs for Vault documents.\n"
+            "5. Provide thorough, complete, professional legal reasoning for `liability_summary`, `settlement_trigger`, `barriers_to_defense`, and `next_tactical_move`. Write full, complete paragraphs — never cut off mid-sentence."
         ),
         expected_output=(
-            "A structured JSON object matching the ResearchOutput schema. All string fields must be "
-            "complete sentences, none cut off mid-word."
+            "A structured JSON object matching the ResearchOutput schema with full, un-truncated legal analysis."
         ),
         agent=legal_strategist,
         output_pydantic=ResearchOutput,
@@ -922,14 +954,14 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
     if output_obj:
         verified_evidence = []
         for item in output_obj.evidence_log:
-            url = item.source_url.strip()
+            url = (item.web_url or "").strip()
+            doc = (item.document_name or "").strip()
             if url and url.startswith("http"):
                 if _is_allowed_domain(url):
                     verified_evidence.append(item)
                 else:
                     print(f"[crew] Discarding non-whitelisted domain URL: '{item.title}' (URL: {url})", flush=True)
-            else:
-                # Retain all non-http vault evidence items
+            elif doc:
                 verified_evidence.append(item)
 
         output_obj.evidence_log = verified_evidence
@@ -937,11 +969,11 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
 
         valid_sources = set(verified_search_urls)
         for item in output_obj.evidence_log:
-            url = item.source_url.strip()
-            if url and not url.startswith("http"):
-                clean_ref = _clean_vault_reference(url)
+            doc = (item.document_name or "").strip()
+            if doc:
+                clean_ref = _clean_vault_reference(doc)
                 if clean_ref:
-                    valid_sources.add(url)
+                    valid_sources.add(clean_ref)
 
         output_obj.source_index = list(valid_sources)
         print(f"[crew] Programmatic source_index set: {output_obj.source_index}", flush=True)
@@ -978,7 +1010,10 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
         for url in raw_dict["source_index"]:
             url_clean = url.strip()
             if url_clean.startswith("http"):
-                source_lines.append(f"- [{url_clean}]({url_clean})")
+                if _is_allowed_domain(url_clean):
+                    source_lines.append(f"- [{url_clean}]({url_clean})")
+                else:
+                    print(f"[crew] raw_dict source_index: blocked non-whitelisted URL: {url_clean}", flush=True)
             else:
                 clean_name = _clean_vault_reference(url_clean)
                 if clean_name:
@@ -991,10 +1026,17 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
         else:
             ai_reasoning = str(raw_summary)
     else:
-        memo_text = str(result)
+        # Fallback: raw LLM output could not be parsed into structured JSON.
+        # Sanitize to strip any hallucinated URLs outside the whitelist.
+        memo_text = _strip_non_whitelisted_urls(str(result))
         ai_reasoning = ""
 
     for marker in _CONTAMINATION_MARKERS:
         memo_text = re.sub(re.escape(marker), "", memo_text, flags=re.IGNORECASE)
+
+    # Defense-in-depth: final sweep to catch any non-whitelisted URL that
+    # slipped through structured filtering (e.g. hallucinated in free-text
+    # fields like liability_summary or settlement_trigger).
+    memo_text = _strip_non_whitelisted_urls(memo_text)
 
     return memo_text.strip(), ai_reasoning

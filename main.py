@@ -383,3 +383,5 @@ async def end_call_session(sid):
 
 # --- Wrap combined app ---
 app = socketio.ASGIApp(sio, fastapi_app)
+
+# uv run rq worker --worker-class rq.SimpleWorker --url redis://localhost:6379 legal
