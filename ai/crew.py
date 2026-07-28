@@ -585,7 +585,11 @@ def _normalize_to_research_output(parsed: dict) -> "ResearchOutput | None":
                     # Normalize URL and document_name fields
                     raw_src = str(item.pop("source_url", item.pop("url", item.pop("link", "")))).strip()
                     if "web_url" not in item and raw_src.startswith("http"):
-                        item["web_url"] = raw_src
+                        if _is_allowed_domain(raw_src):
+                            item["web_url"] = raw_src
+                        else:
+                            # If LLM attached a fake web URL to a vault doc, salvage it as a document reference
+                            item["document_name"] = item.get("title") or "Vault Document"
                     elif "document_name" not in item and raw_src and not raw_src.startswith("http"):
                         item["document_name"] = raw_src
 
@@ -896,15 +900,15 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
             f"CASE CONTEXT:\n{case_context[:1200]}\n\n"
             f"VERIFIED EVIDENCE BLOCK:\n{verified_evidence_text}\n\n"
             f"{rejection_block}\n\n"
-            "INSTRUCTIONS & EVIDENCE GUIDELINES:\n"
+            "INSTRUCTIONS & EVIDENCE GUIDELINES (STRICT ZERO-HALLUCINATION):\n"
             "1. Synthesize the provided VERIFIED EVIDENCE BLOCK into a comprehensive, strategic legal memo for the Managing Partner.\n"
             "2. Fill the `evidence_log` with all relevant findings from the VERIFIED EVIDENCE BLOCK above.\n"
-            "3. For Web Search items: copy the exact https:// URL from the search snippet into `web_url` and leave `document_name` as null.\n"
-            "4. For internal Vault documents: put the document title/filename (e.g. 'Witness Statement - Sarah Jenkins', 'Maintenance Log FLT-04') into `document_name` and leave `web_url` as null. Never invent fake URLs for Vault documents.\n"
+            "3. For Web Search items: copy the EXACT whitelisted URL (bailii.org, legislation.gov.uk, gov.uk, scotcourts.gov.uk) starting with https:// from the snippet into `web_url` and leave `document_name` as null.\n"
+            "4. For internal Vault documents (Incident Report, Maintenance Log, Policy Document, Email Chain, Teams Conversation, Timeline Summary, etc.): set `document_name` to the exact title (e.g. 'Incident Report', 'Maintenance Log FLT-04') and set `web_url` strictly to null. ABSOLUTELY DO NOT generate, hallucinate, or attach external HTTP/HTTPS URLs to internal Vault documents or generic terms like 'email chain' or 'timeline'.\n"
             "5. Provide thorough, complete, professional legal reasoning for `liability_summary`, `settlement_trigger`, `barriers_to_defense`, and `next_tactical_move`. Write full, complete paragraphs — never cut off mid-sentence."
         ),
         expected_output=(
-            "A structured JSON object matching the ResearchOutput schema with full, un-truncated legal analysis."
+            "A structured JSON object matching the ResearchOutput schema with full, un-truncated legal analysis and strictly validated source citations."
         ),
         agent=legal_strategist,
         output_pydantic=ResearchOutput,
