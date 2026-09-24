@@ -67,13 +67,16 @@ def get_vector_store(case_id: int) -> PineconeVectorStore:
     )
 
 
-def split_text_into_chunks(text: str, source_label: str) -> list:
+def split_text_into_chunks(text: str, source_label: str, url: str = "") -> list:
     """Splits plain text into structured LangChain Documents with source metadata."""
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
     )
-    docs = splitter.create_documents([text], metadatas=[{"source": source_label}])
+    metadata = {"source": source_label}
+    if url:
+        metadata["url"] = url
+    docs = splitter.create_documents([text], metadatas=[metadata])
     return docs
 
 
@@ -102,7 +105,7 @@ def ingest_pdf_into_vector_store(case_id: int, pdf_path: str, file_bytes: bytes 
             print(f"[vector_store] PDF '{filename}' yielded no text")
             return 0
 
-        chunks = split_text_into_chunks(full_text, source_label=filename)
+        chunks = split_text_into_chunks(full_text, source_label=filename, url=pdf_path)
         if not chunks:
             return 0
 
@@ -142,7 +145,7 @@ def ingest_url_into_vector_store(case_id: int, url: str) -> int:
             print(f"[vector_store] URL '{url}' yielded no text")
             return 0
 
-        chunks = split_text_into_chunks(full_text, source_label=url)
+        chunks = split_text_into_chunks(full_text, source_label=url, url=url)
         if not chunks:
             return 0
 
@@ -168,7 +171,7 @@ def ingest_image_into_vector_store(case_id: int, image_path: str) -> int:
         return 0
 
     full_text = f"[Image: {filename}]\n\n{description}"
-    chunks = split_text_into_chunks(full_text, source_label=f"Image: {filename}")
+    chunks = split_text_into_chunks(full_text, source_label=f"Image: {filename}", url=image_path)
 
     if not chunks:
         return 0
@@ -195,7 +198,11 @@ def search_vector_store(case_id: int, query: str, top_k: int = 5) -> list:
         formatted_chunks = []
         for doc in results:
             source = doc.metadata.get("source", "Unknown source")
-            chunk_text = f"[{source}]\n{doc.page_content}"
+            url = doc.metadata.get("url", "")
+            if url:
+                chunk_text = f"[{source}|{url}]\n{doc.page_content}"
+            else:
+                chunk_text = f"[{source}]\n{doc.page_content}"
             formatted_chunks.append(chunk_text)
 
         return formatted_chunks

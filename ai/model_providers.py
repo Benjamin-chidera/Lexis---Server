@@ -32,9 +32,8 @@ if os.getenv("NVIDIA_API_KEY") and not os.getenv("NVIDIA_NIM_API_KEY"):
 # MODEL = "mistral-large-latest"
 # MODEL = "mistral-small-latest"
 # MODEL = "meta/llama-3.1-70b-instruct"
-# MODEL = "deepseek-ai/deepseek-v4-pro"
-# MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
-MODEL = "meta/llama-3.1-70b-instruct"
+# MODEL = "z-ai/glm-5.3-flash"
+MODEL = "meta/llama-3.2-11b-vision-instruct"
 
 
 # 2. Embedding Model (Used for Vector Store)
@@ -43,7 +42,8 @@ MODEL = "meta/llama-3.1-70b-instruct"
 # EMBEDDING_MODEL_NAME = "mistral-embed"
 # EMBEDDING_MODEL_NAME = "nomic-embed-text"
 # EMBEDDING_MODEL_NAME = "NV-Embed-QA"
-EMBEDDING_MODEL_NAME = "nvidia/llama-nemotron-embed-1b-v2"
+# EMBEDDING_MODEL_NAME = "nvidia/llama-nemotron-embed-1b-v2"
+EMBEDDING_MODEL_NAME = "nvidia/nemotron-3-embed-1b"
 
 # 3. Vision Model (Used for Image Handling)
 # VISION_MODEL_NAME = "granite3.2-vision:latest"

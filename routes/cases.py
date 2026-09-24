@@ -1,4 +1,5 @@
 import json
+import sentry_sdk
 from typing import List
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends
 from sqlmodel import Session, select
@@ -50,6 +51,7 @@ def get_cases(
                     "addedAt": c.created_at.strftime("%H:%M")
                 })
         except Exception as e:
+            sentry_sdk.capture_exception(e)
             print(f"[cases] Error parsing URLs for case {c.id}: {e}")
 
         # 2. Parse PDFs
@@ -58,14 +60,16 @@ def get_cases(
             pdfs = json.loads(pdfs_raw)
             for p in pdfs:
                 filename = p.split("/")[-1] if "/" in p else p
+                url = p if (p.startswith("http://") or p.startswith("https://")) else f"/api/files/{filename}"
                 vault.append({
                     "id": f"pdf-{len(vault)}",
                     "type": "pdf",
                     "name": filename,
-                    "url": f"http://localhost:8000/api/files/{filename}",
+                    "url": url,
                     "addedAt": c.created_at.strftime("%H:%M")
                 })
         except Exception as e:
+            sentry_sdk.capture_exception(e)
             print(f"[cases] Error parsing PDFs for case {c.id}: {e}")
 
         # 3. Parse Images
@@ -74,14 +78,16 @@ def get_cases(
             images = json.loads(imgs_raw)
             for img in images:
                 filename = img.split("/")[-1] if "/" in img else img
+                url = img if (img.startswith("http://") or img.startswith("https://")) else f"/api/files/{filename}"
                 vault.append({
                     "id": f"image-{len(vault)}",
                     "type": "image",
                     "name": filename,
-                    "url": f"http://localhost:8000/api/files/{filename}",
+                    "url": url,
                     "addedAt": c.created_at.strftime("%H:%M")
                 })
         except Exception as e:
+            sentry_sdk.capture_exception(e)
             print(f"[cases] Error parsing Images for case {c.id}: {e}")
 
         name = "New Case"

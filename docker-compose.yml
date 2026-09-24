@@ -52,18 +52,40 @@ services:
     depends_on:
       - redis
 
+  langfuse-db:
+    image: postgres:16-alpine
+    container_name: legal-assistant-langfuse-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=langfuse
+    ports:
+      - "5433:5432"
+    volumes:
+      - langfuse_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d langfuse"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+
   langfuse-server:
     image: ghcr.io/langfuse/langfuse:2
     container_name: legal-assistant-langfuse
+    restart: unless-stopped
     ports:
       - "3005:3000"
     environment:
-      - DATABASE_URL=${DATABASE_URL}
-      # - DATABASE_URL=${LANGFUSE_DB_URL}
+      - DATABASE_URL=postgresql://postgres:postgres@langfuse-db:5432/langfuse
       - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:-mysecret} # Fallback to 'mysecret' if not set in .env
       - SALT=${SALT:-mysalt} # Fallback to 'mysalt' if not set in .env
-      - NEXTAUTH_URL=${NEXTAUTH_URL} # Replace with your VPS IP or Domain in production
+      - NEXTAUTH_URL=${NEXTAUTH_URL:-http://localhost:3005} # Replace with your VPS IP or Domain in production
       - TELEMETRY_ENABLED=false
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
 
 volumes:
   redis_data:
+  langfuse_db_data:

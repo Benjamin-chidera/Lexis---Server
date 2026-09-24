@@ -25,10 +25,23 @@ import json
 import redis
 import time
 
+import sentry_sdk
 from dotenv import load_dotenv
 from sqlmodel import Session
 
 load_dotenv()
+
+# The RQ worker runs as a separate process from FastAPI,
+# so it needs its own Sentry initialization.
+SENTRY_DSN = os.getenv("SENTRY_DSN")
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=os.getenv("ENVIRONMENT", "production"),
+        traces_sample_rate=0.2,
+        send_default_pii=False,
+        server_name=os.getenv("RENDER_SERVICE_NAME", "legal-assistant-worker"),
+    )
 
 from database import engine
 from models import Case, Alert
@@ -92,7 +105,8 @@ def research_job(case_id: int) -> None:
                 print(f"[worker] Waiting {sleep_time}s before retry {attempt + 1}/{max_retries}...")
                 time.sleep(sleep_time)
             else:
-                # Final failure
+                # Final failure — report to Sentry since all retries exhausted
+                sentry_sdk.capture_exception(error)
                 title = f"Research Error: Case #{case_id}"
                 summary = f"Background research encountered an error and could not complete after {max_retries} attempts.\n\n**Error:** {str(error)}"
                 ai_reasoning = ""

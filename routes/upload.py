@@ -13,6 +13,7 @@ and the user doesn't have to wait for the embedding process to complete.
 
 import time
 import json
+import sentry_sdk
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Depends
 from typing import List, Optional
 from sqlmodel import Session
@@ -47,6 +48,7 @@ def ingest_pdf_in_background(case_id: int, file_url: str, file_bytes: bytes = No
         chunk_count = ingest_pdf_into_vector_store(case_id, file_url, file_bytes)
         print(f"[upload] PDF ingested for case {case_id}: {chunk_count} chunks")
     except Exception as error:
+        sentry_sdk.capture_exception(error)
         print(f"[upload] PDF ingestion failed for case {case_id}: {str(error)}")
 
 
@@ -63,6 +65,7 @@ def ingest_image_in_background(case_id: int, file_url: str):
         chunk_count = ingest_image_into_vector_store(case_id, file_url)
         print(f"[upload] Image ingested for case {case_id}: {chunk_count} chunks")
     except Exception as error:
+        sentry_sdk.capture_exception(error)
         print(f"[upload] Image ingestion failed for case {case_id}: {str(error)}")
 
 

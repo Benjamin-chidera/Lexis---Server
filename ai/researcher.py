@@ -60,7 +60,7 @@ def _build_adversarial_queries(context: str, analyst_findings: str) -> list:
     return queries
 
 
-def run_researcher(context: str, analyst_findings: str) -> str:
+def run_researcher(context: str, analyst_findings: str) -> tuple[str, list[dict]]:
     """
     Runs adversarial web searches to find real legal precedents.
 
@@ -68,8 +68,7 @@ def run_researcher(context: str, analyst_findings: str) -> str:
         context:          The attorney's case context (contains opponent name/details)
         analyst_findings: Output from the Analyst node (documented vulnerabilities)
 
-    Returns a formatted string of real-world precedents found, or a clear
-    "no precedents found" statement.
+    Returns a tuple of (formatted_findings_string, sources_list).
     """
     # Try to import Tavily — if not available, return a clear message
     try:
@@ -78,7 +77,8 @@ def run_researcher(context: str, analyst_findings: str) -> str:
         return (
             "Researcher: Web search unavailable.\n\n"
             "Reason: langchain-tavily is not installed. "
-            "Run: uv add langchain-tavily"
+            "Run: uv add langchain-tavily",
+            []
         )
 
     # Check API key is present
@@ -86,7 +86,8 @@ def run_researcher(context: str, analyst_findings: str) -> str:
     if not tavily_api_key:
         return (
             "Researcher: Web search unavailable.\n\n"
-            "Reason: TAVILY_API_KEY is not set in the .env file."
+            "Reason: TAVILY_API_KEY is not set in the .env file.",
+            []
         )
 
     # Build the adversarial search queries
@@ -99,6 +100,7 @@ def run_researcher(context: str, analyst_findings: str) -> str:
     print(f"[researcher] Running {len(queries_to_run)} adversarial searches...")
 
     all_results = []
+    sources = []
 
     for query in queries_to_run: 
         try:
@@ -115,8 +117,25 @@ def run_researcher(context: str, analyst_findings: str) -> str:
             raw_results = search_tool.invoke(query)
 
             if raw_results:
-                # Format the results clearly so the Strategist can read them
-                all_results.append(f"### Search: \"{query}\"\n{raw_results}")
+                formatted_search = f"### Search: \"{query}\"\n"
+                items = []
+                if isinstance(raw_results, dict):
+                    items = raw_results.get("results", [])
+                elif isinstance(raw_results, list):
+                    items = raw_results
+
+                for item in items:
+                    if isinstance(item, dict):
+                        url = item.get("url", "")
+                        title = item.get("title", "Source").strip()
+                        content = item.get("content", "").strip()
+                        formatted_search += f"- **[{title}]({url})**\n  {content}\n\n"
+                        if url:
+                            sources.append({"title": title, "url": url})
+                    else:
+                        formatted_search += f"- {item}\n"
+
+                all_results.append(formatted_search)
 
         except Exception as error:
             print(f"[researcher] Search failed for query '{query[:60]}': {error}")
@@ -127,10 +146,11 @@ def run_researcher(context: str, analyst_findings: str) -> str:
             "No web precedents found.\n\n"
             "Reason: All adversarial search queries returned no results. "
             "The researcher could not locate lawsuits or regulatory actions "
-            "matching the case context."
+            "matching the case context.",
+            []
         )
 
     # Combine all search results into one block for the Strategist
     combined = "\n\n---\n\n".join(all_results)
-    print(f"[researcher] Research complete. Total results length: {len(combined)} chars")
-    return combined
+    print(f"[researcher] Research complete. Total results length: {len(combined)} chars, sources: {len(sources)}")
+    return combined, sources

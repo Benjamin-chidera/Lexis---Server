@@ -7,6 +7,7 @@ Runs the synchronous chat_graph.invoke() in a thread executor to avoid blocking 
 
 import json
 import asyncio
+import sentry_sdk
 from datetime import datetime
 from sqlmodel import Session, select
 
@@ -121,6 +122,7 @@ async def process_chat_message(case_id: int, user_content: str, sio, sid: str) -
             "web_results": "",
             "analyst_findings": "",
             "researcher_findings": "",
+            "web_sources": [],
             "emitter": emitter,
             "response": "",
             "citation": None,
@@ -146,6 +148,7 @@ async def process_chat_message(case_id: int, user_content: str, sio, sid: str) -
             try:
                 enqueue_research(case_id)
             except Exception as e:
+                sentry_sdk.capture_exception(e)
                 print(f"[chat_handler] Error enqueuing research: {e}")
 
         # Step 5: Save AI response to DB
@@ -153,7 +156,7 @@ async def process_chat_message(case_id: int, user_content: str, sio, sid: str) -
             case_id=case_id,
             role="ai",
             content=ai_response_text,
-            citation=json.dumps(citation) if citation else None,
+            citation_json=json.dumps(citation) if citation else None,
         )
         with Session(engine) as session:
             session.add(ai_message)
@@ -178,6 +181,7 @@ async def process_chat_message(case_id: int, user_content: str, sio, sid: str) -
         )
 
     except Exception as error:
+        sentry_sdk.capture_exception(error)
         print(f"[chat_handler] Error processing message for case {case_id}: {str(error)}")
         # Stop the typing indicator
         await sio.emit("ai_typing_done", {"case_id": case_id}, to=sid)

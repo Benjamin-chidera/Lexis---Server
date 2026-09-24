@@ -11,6 +11,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from http.cookies import SimpleCookie
 
+import sentry_sdk
 import redis.asyncio as aioredis
 import socketio
 from fastapi import FastAPI
@@ -26,6 +27,25 @@ from ai.background import enqueue_research
 from ai.chat_handler import process_chat_message
 from ai.vector_store import ingest_pdf_into_vector_store, ingest_url_into_vector_store
 from ai.call_handler import CallSession, active_call_sessions
+
+
+# --- Sentry Error Tracking ---
+# Only initialize when SENTRY_DSN is set (i.e. production / staging).
+# Local dev runs without Sentry unless you explicitly provide a DSN.
+SENTRY_DSN = os.getenv("SENTRY_DSN")
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=os.getenv("ENVIRONMENT", "production"),
+        # Capture 20% of transactions for performance monitoring
+        traces_sample_rate=0.2,
+        # Send the full request body with error reports
+        send_default_pii=False,
+        # Attach server name so you know which replica errored
+        server_name=os.getenv("RENDER_SERVICE_NAME", "legal-assistant-server"),
+    )
+    print(f"[sentry] Initialized for environment: {os.getenv('ENVIRONMENT', 'production')}")
+
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 PUBSUB_CHANNEL = "research_done"
@@ -76,6 +96,7 @@ async def _redis_pubsub_listener(sio_instance):
                 await sio_instance.emit("new_alert", {"alert": payload})
                 print(f"[pubsub] Forwarded alert for case {payload.get('case_id')}")
         except Exception as error:
+            sentry_sdk.capture_exception(error)
             print(f"[pubsub] Failed to relay message: {error}")
 
 
@@ -122,6 +143,7 @@ async def lifespan(app: FastAPI):
                     print(f"[lifespan] Re-enqueuing crashed case research: {case.id}")
                     enqueue_research(case.id)
     except Exception as error:
+        sentry_sdk.capture_exception(error)
         print(f"[lifespan] Startup re-enqueue error: {error}")
 
     yield
@@ -170,6 +192,12 @@ def root():
 @fastapi_app.get("/health")
 def health_check():
     return {"status": "healthy"}
+
+
+@fastapi_app.get("/sentry-debug")
+def trigger_sentry_debug_error():
+    """Test route for verifying Sentry error capture."""
+    raise RuntimeError("Sentry test error: Legal Assistant backend is reporting properly!")
 
 
 # --- Socket.IO event handlers ---

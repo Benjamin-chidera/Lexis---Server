@@ -4093,6 +4093,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/bf/00/b8cc413748fb6383d1582e7cda51314f99743351c462a92dc690d5b5853b/sentry_sdk-2.59.0-py2.py3-none-any.whl", hash = "sha256:abcf65ee9a9d9cdebf9ad369782408ecca9c1c792686ef06ba34f5ab233527fe", size = 468432, upload-time = "2026-05-04T12:19:04.741Z" },
 ]
 
+[package.optional-dependencies]
+fastapi = [
+    { name = "fastapi" },
+]
+
 [[package]]
 name = "server"
 version = "0.1.0"
@@ -4130,6 +4135,7 @@ dependencies = [
     { name = "requests" },
     { name = "rq" },
     { name = "rq-dashboard" },
+    { name = "sentry-sdk", extra = ["fastapi"] },
     { name = "setuptools" },
     { name = "sqlmodel" },
     { name = "uvicorn", extra = ["standard"] },
@@ -4169,6 +4175,7 @@ requires-dist = [
     { name = "requests", specifier = ">=2.33.1" },
     { name = "rq", specifier = ">=2.8.0" },
     { name = "rq-dashboard", specifier = ">=0.8.6" },
+    { name = "sentry-sdk", extras = ["fastapi"], specifier = ">=2.0.0" },
     { name = "setuptools", specifier = "==69.5.1" },
     { name = "sqlmodel", specifier = ">=0.0.38" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.46.0" },

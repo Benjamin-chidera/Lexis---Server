@@ -55,6 +55,7 @@ class CaseState(TypedDict):
 
     # Real-world lawsuits, FTC fines, and precedents found via adversarial web search
     researcher_findings: str
+    web_sources: Optional[List[Dict[str, str]]]
 
     # ── Output fields (set by the strategist node) ────────────────────────────
 
