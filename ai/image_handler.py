@@ -12,7 +12,7 @@ import requests
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 
 # Model to use for image understanding
-VISION_MODEL = "nvidia/llama-3.1-nemotron-nano-vl-8b-v1"
+VISION_MODEL = "meta/llama-3.2-11b-vision-instruct"
 
 
 def describe_image(image_path: str) -> str:

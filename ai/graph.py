@@ -123,7 +123,8 @@ def researcher_node(state: CaseState) -> dict:
     if is_greeting or is_research_cmd:
         print(f"[graph] researcher_node: Skipping web search for query '{user_query}'")
         return {
-            "researcher_findings": "Skipped: query does not require real-time web search."
+            "researcher_findings": "Skipped: query does not require real-time web search.",
+            "web_sources": [],
         }
 
     # Emit progress to the client
@@ -134,12 +135,13 @@ def researcher_node(state: CaseState) -> dict:
 
     # Run the adversarial Tavily searches
     # Pass empty string for analyst_findings since we run in parallel
-    researcher_findings = run_researcher(context, "")
+    researcher_findings, web_sources = run_researcher(context, "")
 
-    print(f"[graph] researcher_node: Complete ({len(researcher_findings)} chars)")
+    print(f"[graph] researcher_node: Complete ({len(researcher_findings)} chars, {len(web_sources)} sources)")
 
     return {
         "researcher_findings": researcher_findings,
+        "web_sources": web_sources,
     }
 
 
@@ -189,16 +191,56 @@ def strategist_node(state: CaseState) -> dict:
     if vault_chunks:
         first_line = vault_chunks[0].split("\n")[0]
         raw_source = first_line.strip("[]")
-        filename = raw_source.replace("Source:", "").replace("source:", "").strip()
+
+        # Check if URL was embedded in format [source|url]
+        parts = raw_source.split("|", 1)
+        raw_name = parts[0]
+        embedded_url = parts[1] if len(parts) > 1 else None
+
+        filename = raw_name.replace("Source:", "").replace("source:", "").strip()
+
+        # Find matching URL from case files if not embedded
+        resolved_url = embedded_url
+        if not resolved_url:
+            pdf_paths = state.get("pdf_paths", []) or []
+            image_paths = state.get("image_paths", []) or []
+            urls = state.get("urls", []) or []
+            all_sources = pdf_paths + image_paths + urls
+
+            clean_target = filename.lower().replace("image:", "").strip()
+            for src in all_sources:
+                src_base = src.split("/")[-1].lower() if "/" in src else src.lower()
+                if clean_target and (clean_target in src_base or src_base in clean_target or clean_target in src.lower()):
+                    resolved_url = src
+                    break
+
+        is_image = "image:" in filename.lower() or any(filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif"])
+        exhibit_label = "Visual Evidence" if is_image else "Case Vault Document"
+
         citation = {
             "filename": filename if filename else "Case Vault",
-            "exhibit": "Case Vault Document",
+            "exhibit": exhibit_label,
+            "url": resolved_url,
         }
     elif researcher_findings and "No web precedents" not in researcher_findings and "Skipped:" not in researcher_findings:
-        citation = {
-            "filename": "Web Research",
-            "exhibit": "External Sources",
-        }
+        web_sources = state.get("web_sources", []) or []
+        first_src = web_sources[0] if web_sources else None
+
+        if first_src and first_src.get("url"):
+            citation = {
+                "filename": first_src.get("title", "Web Research"),
+                "exhibit": "External Precedent",
+                "url": first_src.get("url"),
+            }
+        else:
+            import re
+            url_match = re.search(r'https?://[^\s)\]]+', researcher_findings)
+            first_url = url_match.group(0) if url_match else None
+            citation = {
+                "filename": "Web Research",
+                "exhibit": "External Sources",
+                "url": first_url,
+            }
 
     print("[graph] strategist_node: Complete")
 

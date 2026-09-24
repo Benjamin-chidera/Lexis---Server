@@ -24,6 +24,8 @@ import traceback
 from datetime import datetime
 from typing import Optional
 
+import sentry_sdk
+
 from dotenv import load_dotenv
 from mistralai.client import Mistral
 from sqlmodel import Session, select
@@ -43,23 +45,22 @@ STT_MODEL = "voxtral-mini-latest"
 # TTS model for generating AI speech (Voxtral Mini Text-to-Speech)
 TTS_MODEL = "voxtral-mini-tts-2603"
 
-# Chat model for generating AI text responses
-CHAT_MODEL = "mistral-large-latest"
+# Chat model for generating AI text responses (Tier-allowed and fast for voice)
+CHAT_MODEL = "ministral-8b-latest"
 
 # Preset voice ID for TTS output
 TTS_VOICE_ID = "gb_jane_neutral"
 
-# System prompt for the voice agent — tailored for spoken conversation
+# System prompt for the voice agent — tailored for fast spoken conversation
 VOICE_SYSTEM_PROMPT = """You are Lexis, a senior legal AI assistant having a live voice conversation with a lawyer about their case.
 
 RULES FOR VOICE RESPONSES:
-- Keep responses SHORT and conversational (2-4 sentences max)
-- Speak naturally as if in a phone call — no markdown, no bullet points, no headers
-- Use simple language a person can follow by ear
-- If asked a complex question, give a brief answer first, then ask if they want more detail
-- Reference the case documents and context you've been given
-- Be confident but honest — say "I'd need to check that" if unsure
-- Use transitional phrases like "So basically...", "The key issue here is...", "What I'm seeing is..."
+- Speak in 1 or 2 concise, natural sentences max (keep it under 30 words). Be conversational, direct, and crisp.
+- Never recite long paragraphs, lists, or bullet points. This is a real-time voice call.
+- Use simple language a person can follow easily by ear.
+- If asked a complex question, give a brief core answer first, then ask if they want you to elaborate.
+- Reference the case documents and context directly.
+- Use natural conversational phrases like "The key issue here is...", "Looking at the records...", "What we see is..."
 
 TRIGGERING BACKGROUND RESEARCH:
 - Always check the CASE CONTEXT & RESEARCH STATUS section first. If the user's query can be fully answered using the current documents or previous research findings, do NOT trigger a new research job.
@@ -285,6 +286,7 @@ class CallSession:
         except asyncio.CancelledError:
             pass
         except Exception as error:
+            sentry_sdk.capture_exception(error)
             print(f"[call] Voice processing loop crashed: {error}")
             traceback.print_exc()
             await self.sio.emit("call_error", {
@@ -329,7 +331,7 @@ class CallSession:
         Uses dynamic RMS-based Voice Activity Detection (VAD) to find when user starts and stops speaking.
         """
         chunks = []
-        silence_timeout = 1.5  # seconds of silence before considering speech done
+        silence_timeout = 0.7  # seconds of silence before considering speech done (snappy turn-taking)
         chunk_timeout = 0.1    # how long to wait for each individual chunk
 
         # Step 1: Wait until the user starts speaking (RMS above threshold)
@@ -445,6 +447,7 @@ class CallSession:
             return result.text if result and result.text else ""
 
         except Exception as error:
+            sentry_sdk.capture_exception(error)
             print(f"[call] STT error for case {self.case_id}: {error}")
             traceback.print_exc()
             return ""
@@ -558,6 +561,7 @@ class CallSession:
             print(f"[call] AI response sent for case {self.case_id}: {ai_text[:80]}...")
 
         except Exception as error:
+            sentry_sdk.capture_exception(error)
             print(f"[call] Response generation error for case {self.case_id}: {error}")
             traceback.print_exc()
             await self.sio.emit("call_error", {
@@ -571,21 +575,19 @@ class CallSession:
         Sends the conversation history + case context to Mistral chat
         and returns the AI's text response.
         """
-        # Load the latest case context and background task status dynamically
-        latest_context = await asyncio.get_event_loop().run_in_executor(
-            None, self._load_case_context
-        )
+        # Use the cached case context loaded at session start (zero DB latency)
+        case_context = self.case_context or "No case context available."
 
         # Build the messages array for the chat API
         messages = [
             {
                 "role": "system",
-                "content": f"{VOICE_SYSTEM_PROMPT}\n\n--- CASE CONTEXT & RESEARCH STATUS ---\n{latest_context}",
+                "content": f"{VOICE_SYSTEM_PROMPT}\n\n--- CASE CONTEXT & RESEARCH STATUS ---\n{case_context}",
             }
         ]
 
-        # Add conversation history (keep last 20 messages to avoid token limits)
-        recent_history = self.conversation_history[-20:]
+        # Add conversation history (keep last 10 messages for speed and prompt brevity)
+        recent_history = self.conversation_history[-10:]
         for msg in recent_history:
             messages.append({
                 "role": msg["role"],
@@ -594,19 +596,40 @@ class CallSession:
 
         # Run the chat completion in a thread executor (blocking API call)
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: self.client.chat.complete(
-                model=CHAT_MODEL,
-                messages=messages,
-                temperature=0.7,
-                max_tokens=300,  # Keep responses short for voice
+        try:
+            response = await loop.run_in_executor(
+                None,
+                lambda: self.client.chat.complete(
+                    model=CHAT_MODEL,
+                    messages=messages,
+                    temperature=0.6,
+                    max_tokens=100,  # Snappy, low-latency responses for voice
+                )
             )
-        )
 
-        # Extract the response text
-        if response and response.choices:
-            return response.choices[0].message.content
+            # Extract the response text
+            if response and response.choices:
+                return response.choices[0].message.content
+        except Exception as error:
+            print(f"[call] Primary voice chat model {CHAT_MODEL} failed: {error}. Falling back to NVIDIA NIM...")
+            try:
+                from .model_providers import get_chat_model
+                from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+                nvidia_llm = get_chat_model()
+                lc_messages = []
+                for m in messages:
+                    if m["role"] == "system":
+                        lc_messages.append(SystemMessage(content=m["content"]))
+                    elif m["role"] == "user":
+                        lc_messages.append(HumanMessage(content=m["content"]))
+                    elif m["role"] == "assistant":
+                        lc_messages.append(AIMessage(content=m["content"]))
+                res = await loop.run_in_executor(None, lambda: nvidia_llm.invoke(lc_messages))
+                return res.content
+            except Exception as fb_err:
+                print(f"[call] Fallback voice chat model failed: {fb_err}")
+                raise error
+
         return "I'm having trouble getting an answer right now."
 
     async def _generate_speech(self, text: str) -> Optional[str]:
@@ -632,6 +655,7 @@ class CallSession:
             return None
 
         except Exception as error:
+            sentry_sdk.capture_exception(error)
             print(f"[call] TTS error for case {self.case_id}: {error}")
             traceback.print_exc()
             return None

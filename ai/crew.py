@@ -392,8 +392,8 @@ def _format_raw_research_dict(data: dict) -> str:
         for item in evidence:
             if isinstance(item, dict):
                 evidence_type = item.get("evidence_type", item.get("type", "Evidence"))
-                title = item.get("title", "Untitled")
-                item_summary = item.get("summary", "")
+                title = item.get("title") or item.get("document_name") or "Legal Finding"
+                item_summary = item.get("summary") or item.get("snippet") or item.get("description") or ""
                 url = str(item.get("web_url") or item.get("source_url") or "").strip()
                 doc = str(item.get("document_name") or "").strip()
                 if not doc and url and not url.startswith("http"):
@@ -417,12 +417,23 @@ def _format_raw_research_dict(data: dict) -> str:
                 lines.append(f"- {str(item)}")
 
     leverage = data.get("leverage_strategy", {})
+    settlement = ""
+    barriers = ""
+    next_move = ""
+
     if isinstance(leverage, dict) and leverage:
-        lines.append("\n---")
-        lines.append("\n### LEVERAGE & WINNING STRATEGY")
         settlement = leverage.get("settlement_trigger", "")
         barriers = leverage.get("barriers_to_defense", "")
         next_move = leverage.get("next_tactical_move", "")
+    else:
+        # Check top-level fallback keys
+        settlement = data.get("settlement_trigger", "")
+        barriers = data.get("barriers_to_defense", "")
+        next_move = data.get("next_tactical_move", "")
+
+    if settlement or barriers or next_move:
+        lines.append("\n---")
+        lines.append("\n### LEVERAGE & WINNING STRATEGY")
         if settlement:
             lines.append(f"\n**SETTLEMENT TRIGGER**\n{settlement}")
         if barriers:
@@ -505,26 +516,58 @@ def _unwrap_outer_keys(data: dict) -> dict:
     return data
 
 
+def _clean_malformed_json_text(text: str) -> str:
+    if not text:
+        return ""
+    # Normalize unicode quotes: if key-value pair starts with “: "key": “... -> "key": "
+    cleaned = re.sub(r':\s*“', ': "', text)
+    cleaned = cleaned.replace("“", "'").replace("”", "'")
+    cleaned = cleaned.replace("‘", "'").replace("’", "'")
+    return cleaned
+
+
 def _extract_json_from_raw_text(raw_text: str) -> dict | None:
     if not raw_text:
         return None
 
-    cleaned = raw_text
-    if "```json" in cleaned:
-        parts = cleaned.split("```json")
+    cleaned = _clean_malformed_json_text(raw_text)
+
+    # 1. Primary: Use json_repair to parse and repair any subtle syntax/quote issues
+    try:
+        from json_repair import repair_json
+        repaired = repair_json(cleaned, return_objects=True)
+        if isinstance(repaired, dict) and repaired:
+            return _unwrap_outer_keys(repaired)
+        elif isinstance(repaired, list) and len(repaired) > 0 and isinstance(repaired[0], dict):
+            return _unwrap_outer_keys(repaired[0])
+    except Exception as e:
+        print(f"[crew] json_repair primary pass error: {e}", flush=True)
+
+    # 2. Markdown codeblock extraction
+    target = cleaned
+    if "```json" in target:
+        parts = target.split("```json")
         last_block = parts[-1]
         if "```" in last_block:
-            cleaned = last_block.split("```")[0].strip()
-    elif cleaned.startswith("```") and cleaned.endswith("```"):
-        cleaned = "\n".join(cleaned.split("\n")[1:-1]).strip()
+            target = last_block.split("```")[0].strip()
+    elif target.startswith("```") and target.endswith("```"):
+        target = "\n".join(target.split("\n")[1:-1]).strip()
 
-    parsed = _try_parse_json(cleaned)
+    parsed = _try_parse_json(target)
     if parsed:
         return _unwrap_outer_keys(parsed)
 
+    # 3. Final Answer pattern
     final_answer_match = re.search(r'"Final Answer"\s*:\s*', raw_text, re.IGNORECASE)
     if final_answer_match:
         after_key = raw_text[final_answer_match.end():].strip()
+        try:
+            from json_repair import repair_json
+            repaired = repair_json(after_key, return_objects=True)
+            if isinstance(repaired, dict) and repaired:
+                return _unwrap_outer_keys(repaired)
+        except Exception:
+            pass
         if after_key.startswith('"'):
             try:
                 wrapper = '{"__val__": ' + after_key.rstrip().rstrip("}").rstrip(",") + "}"
@@ -542,75 +585,155 @@ def _extract_json_from_raw_text(raw_text: str) -> dict | None:
             if inner_json:
                 return _unwrap_outer_keys(inner_json)
 
-    found = _extract_first_json_object(raw_text)
+    # 4. First JSON object scanning
+    found = _extract_first_json_object(cleaned)
     if found:
         return _unwrap_outer_keys(found)
 
     return None
 
 
-def _normalize_to_research_output(parsed: dict) -> "ResearchOutput | None":
+def _normalize_to_research_output(parsed: dict, url_to_title_map: dict | None = None) -> "ResearchOutput | None":
     try:
         normalized = dict(parsed)
+        url_to_title = url_to_title_map or {}
 
         if isinstance(normalized.get("liability_summary"), dict):
             normalized["liability_summary"] = _flatten_liability_summary(normalized["liability_summary"])
+        elif not normalized.get("liability_summary"):
+            normalized["liability_summary"] = "No liability summary provided."
 
-        evidence = normalized.get("evidence_log", [])
-        if isinstance(evidence, list):
-            for item in evidence:
-                if isinstance(item, dict):
-                    if "title" not in item:
-                        for alt in ["claim", "name", "header", "topic"]:
-                            if alt in item:
-                                item["title"] = item.pop(alt)
-                                break
-                    if "title" not in item:
-                        item["title"] = "Legal Finding"
-
-                    if "summary" not in item:
-                        for alt in ["description", "details", "content", "text"]:
-                            if alt in item:
-                                item["summary"] = item.pop(alt)
-                                break
-                    if "summary" not in item:
-                        item["summary"] = "No summary provided."
-
-                    if "evidence_type" not in item and "type" in item:
-                        item["evidence_type"] = item.pop("type")
-                    if "evidence_type" not in item:
-                        item_url = str(item.get("web_url") or item.get("source_url") or item.get("url") or "")
-                        item["evidence_type"] = "URL" if item_url.startswith("http") else "PDF Record"
-
-                    # Normalize URL and document_name fields
-                    raw_src = str(item.pop("source_url", item.pop("url", item.pop("link", "")))).strip()
-                    if "web_url" not in item and raw_src.startswith("http"):
-                        if _is_allowed_domain(raw_src):
-                            item["web_url"] = raw_src
-                        else:
-                            # If LLM attached a fake web URL to a vault doc, salvage it as a document reference
-                            item["document_name"] = item.get("title") or "Vault Document"
-                    elif "document_name" not in item and raw_src and not raw_src.startswith("http"):
-                        item["document_name"] = raw_src
-
-        if "source_index" not in normalized and "sources" in normalized:
-            normalized["source_index"] = normalized.pop("sources")
-
-        if "leverage_strategy" not in normalized:
+        # Handle leverage_strategy if fields are at top level or nested
+        if "leverage_strategy" not in normalized or not isinstance(normalized.get("leverage_strategy"), dict):
             for alt_key in ["leverage", "winning_strategy", "tactical_leverage", "strategy"]:
                 if alt_key in normalized and isinstance(normalized[alt_key], dict):
                     normalized["leverage_strategy"] = normalized.pop(alt_key)
                     break
 
-        if "leverage_strategy" not in normalized:
+        if "leverage_strategy" not in normalized or not isinstance(normalized.get("leverage_strategy"), dict):
+            settlement = normalized.pop("settlement_trigger", None)
+            barriers = normalized.pop("barriers_to_defense", None)
+            next_move = normalized.pop("next_tactical_move", None)
             normalized["leverage_strategy"] = {
-                "settlement_trigger": "Not available — run a new research cycle to generate tactical analysis.",
-                "barriers_to_defense": "Not available — run a new research cycle to generate tactical analysis.",
-                "next_tactical_move": "Not available — run a new research cycle to generate tactical analysis.",
+                "settlement_trigger": settlement or "Not available — run a new research cycle to generate tactical analysis.",
+                "barriers_to_defense": barriers or "Not available — run a new research cycle to generate tactical analysis.",
+                "next_tactical_move": next_move or "Not available — run a new research cycle to generate tactical analysis.",
             }
+        else:
+            ls = normalized["leverage_strategy"]
+            if not ls.get("settlement_trigger"):
+                ls["settlement_trigger"] = normalized.pop("settlement_trigger", "Not available.")
+            if not ls.get("barriers_to_defense"):
+                ls["barriers_to_defense"] = normalized.pop("barriers_to_defense", "Not available.")
+            if not ls.get("next_tactical_move"):
+                ls["next_tactical_move"] = normalized.pop("next_tactical_move", "Not available.")
+
+        evidence = normalized.get("evidence_log", [])
+        normalized_evidence = []
+        collected_sources = set()
+
+        if isinstance(evidence, list):
+            for item in evidence:
+                if not isinstance(item, dict):
+                    continue
+
+                raw_src = str(item.pop("source_url", item.pop("url", item.pop("link", "")))).strip()
+                web_url = item.get("web_url") or (raw_src if raw_src.startswith("http") else None)
+                doc_name = item.get("document_name") or (raw_src if raw_src and not raw_src.startswith("http") else None)
+
+                # Summary extraction
+                summary = item.get("summary")
+                if not summary:
+                    for alt in ["snippet", "description", "details", "content", "text"]:
+                        if alt in item and item[alt]:
+                            summary = item.pop(alt)
+                            break
+                if not summary:
+                    summary = "No summary provided."
+
+                # Title extraction
+                title = item.get("title")
+                if not title:
+                    for alt in ["claim", "name", "header", "topic"]:
+                        if alt in item and item[alt]:
+                            title = item.pop(alt)
+                            break
+                if not title:
+                    if doc_name:
+                        title = doc_name
+                    elif web_url:
+                        for u, t in url_to_title.items():
+                            if u in web_url or web_url in u:
+                                title = t
+                                break
+                        if not title:
+                            if "legislation.gov.uk/ukpga/1969/37" in web_url:
+                                title = "Employer's Liability (Defective Equipment) Act 1969"
+                            elif "legislation.gov.uk/ukpga/1974/37" in web_url:
+                                title = "Health and Safety at Work etc. Act 1974"
+                            elif "legislation.gov.uk" in web_url:
+                                title = "UK Statutory Authority"
+                            else:
+                                title = "Official Legal Source"
+                    else:
+                        title = "Legal Finding"
+
+                # Evidence type
+                evidence_type = item.get("evidence_type") or item.get("type")
+                if not evidence_type:
+                    if web_url and "legislation.gov.uk" in str(web_url):
+                        evidence_type = "Legislation"
+                    elif web_url and any(domain in str(web_url) for domain in ["bailii.org", "scotcourts.gov.uk"]):
+                        evidence_type = "Case Law"
+                    elif web_url:
+                        evidence_type = "Web Source"
+                    elif doc_name:
+                        dl = doc_name.lower()
+                        if "policy" in dl:
+                            evidence_type = "Policy"
+                        elif "maintenance" in dl or "repair" in dl:
+                            evidence_type = "Maintenance Log"
+                        elif "email" in dl or "teams" in dl:
+                            evidence_type = "Email Chain"
+                        elif "witness" in dl:
+                            evidence_type = "Witness Statement"
+                        elif "incident" in dl or "accident" in dl:
+                            evidence_type = "Incident Report"
+                        else:
+                            evidence_type = "Vault Document"
+                    else:
+                        evidence_type = "Evidence"
+
+                # Sanitize web_url
+                if web_url and not _is_allowed_domain(web_url):
+                    web_url = None
+                    if not doc_name:
+                        doc_name = title
+
+                normalized_evidence.append(EvidenceItem(
+                    title=title,
+                    summary=summary,
+                    evidence_type=evidence_type,
+                    web_url=web_url,
+                    document_name=doc_name
+                ))
+
+                if web_url:
+                    collected_sources.add(web_url)
+                elif doc_name:
+                    collected_sources.add(doc_name)
+
+        normalized["evidence_log"] = normalized_evidence
+
+        if "source_index" not in normalized and "sources" in normalized:
+            normalized["source_index"] = normalized.pop("sources")
+
+        if not normalized.get("source_index"):
+            normalized["source_index"] = list(collected_sources)
 
         return ResearchOutput(**normalized)
-    except Exception:
+    except Exception as e:
+        print(f"[crew] _normalize_to_research_output error: {e}", flush=True)
         return None
 
 
@@ -902,13 +1025,24 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
             f"{rejection_block}\n\n"
             "INSTRUCTIONS & EVIDENCE GUIDELINES (STRICT ZERO-HALLUCINATION):\n"
             "1. Synthesize the provided VERIFIED EVIDENCE BLOCK into a comprehensive, strategic legal memo for the Managing Partner.\n"
-            "2. Fill the `evidence_log` with all relevant findings from the VERIFIED EVIDENCE BLOCK above.\n"
-            "3. For Web Search items: copy the EXACT whitelisted URL (bailii.org, legislation.gov.uk, gov.uk, scotcourts.gov.uk) starting with https:// from the snippet into `web_url` and leave `document_name` as null.\n"
-            "4. For internal Vault documents (Incident Report, Maintenance Log, Policy Document, Email Chain, Teams Conversation, Timeline Summary, etc.): set `document_name` to the exact title (e.g. 'Incident Report', 'Maintenance Log FLT-04') and set `web_url` strictly to null. ABSOLUTELY DO NOT generate, hallucinate, or attach external HTTP/HTTPS URLs to internal Vault documents or generic terms like 'email chain' or 'timeline'.\n"
-            "5. Provide thorough, complete, professional legal reasoning for `liability_summary`, `settlement_trigger`, `barriers_to_defense`, and `next_tactical_move`. Write full, complete paragraphs — never cut off mid-sentence."
+            "2. Fill the `evidence_log` with all relevant findings from the VERIFIED EVIDENCE BLOCK above. For every evidence item, you MUST provide:\n"
+            "   - `title`: The official title of the statute, case law precedent, or vault document (e.g. \"Employer's Liability (Defective Equipment) Act 1969\", \"Health and Safety at Work etc. Act 1974\", \"Forklift Maintenance Log FLT-04\")\n"
+            "   - `evidence_type`: 'Legislation', 'Case Law', 'Policy Extract', 'Maintenance Log', 'Email Chain', or 'Witness Statement'\n"
+            "   - `summary`: Thorough, professional legal explanation of what this evidence proves and its strategic impact\n"
+            "   - `web_url`: For Web Search items, copy the EXACT whitelisted URL (bailii.org, legislation.gov.uk, gov.uk, scotcourts.gov.uk) starting with https://. MUST BE null if internal Vault document.\n"
+            "   - `document_name`: For internal Vault documents, set to the exact title (e.g. 'Incident Report', 'Maintenance Log FLT-04'). MUST BE null if Web Search item.\n"
+            "3. Fill `leverage_strategy` with:\n"
+            "   - `settlement_trigger`: The single most powerful fact from the Evidence Log that creates maximum settlement pressure\n"
+            "   - `barriers_to_defense`: The opponent's most likely defense, followed by the direct counter-argument\n"
+            "   - `next_tactical_move`: The exact recommended next step to force a win\n"
+            "4. Fill `source_index` with a list of all URLs and vault document names cited.\n"
+            "5. OUTPUT FORMAT REQUIREMENTS (CRITICAL):\n"
+            "   - Return ONLY a single valid JSON object adhering strictly to the ResearchOutput schema.\n"
+            "   - DO NOT include conversational text, notes, or explanations before or after the JSON.\n"
+            "   - Ensure all internal quotation marks in strings are properly escaped."
         ),
         expected_output=(
-            "A structured JSON object matching the ResearchOutput schema with full, un-truncated legal analysis and strictly validated source citations."
+            "A single, strictly valid JSON object matching the ResearchOutput schema with full, un-truncated legal analysis and strictly validated source citations."
         ),
         agent=legal_strategist,
         output_pydantic=ResearchOutput,
@@ -940,6 +1074,8 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
     output_obj = None
     raw_dict = None
 
+    url_to_title_map = {item["url"]: item["title"] for item in verified_web_evidence if item.get("url")}
+
     if hasattr(result, 'pydantic') and result.pydantic:
         output_obj = result.pydantic
     else:
@@ -947,7 +1083,7 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
         parsed = _extract_json_from_raw_text(raw_text)
         if parsed:
             raw_dict = parsed
-            output_obj = _normalize_to_research_output(parsed)
+            output_obj = _normalize_to_research_output(parsed, url_to_title_map=url_to_title_map)
         elif raw_text and raw_text.count("{") > raw_text.count("}"):
             print(
                 "[crew] Output appears to be truncated JSON (unbalanced braces) and "
@@ -973,7 +1109,10 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
 
         valid_sources = set(verified_search_urls)
         for item in output_obj.evidence_log:
+            url = (item.web_url or "").strip()
             doc = (item.document_name or "").strip()
+            if url and _is_allowed_domain(url):
+                valid_sources.add(url)
             if doc:
                 clean_ref = _clean_vault_reference(doc)
                 if clean_ref:
@@ -990,20 +1129,22 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
         verified_raw_evidence = []
         for item in raw_evidence:
             if isinstance(item, dict):
-                item_url = str(item.get("source_url", "")).strip()
-                item_title = str(item.get("title", "")).lower()
+                item_url = str(item.get("web_url") or item.get("source_url") or "").strip()
+                item_doc = str(item.get("document_name") or "").strip()
+                item_title = str(item.get("title") or item_doc or "").lower()
                 if item_url.startswith("http"):
                     if _is_allowed_domain(item_url) and item_url in verified_search_urls:
                         verified_raw_evidence.append(item)
                     else:
                         print(f"[crew] Discarding raw_dict evidence: '{item.get('title')}' (URL: {item_url})", flush=True)
-                elif item_url:
-                    cleaned = _clean_vault_reference(item_url).lower()
+                elif item_doc or item_url:
+                    ref_str = item_doc or item_url
+                    cleaned = _clean_vault_reference(ref_str).lower()
                     is_known_vault = any(keyword in cleaned or keyword in item_title for keyword in vault_doc_keywords)
                     if is_known_vault:
                         verified_raw_evidence.append(item)
                     else:
-                        print(f"[crew] Discarding raw_dict evidence (not in vault): '{item.get('title')}' (source: {item_url})", flush=True)
+                        print(f"[crew] Discarding raw_dict evidence (not in vault): '{item.get('title')}' (source: {ref_str})", flush=True)
         raw_dict["evidence_log"] = verified_raw_evidence
         raw_dict["source_index"] = list(verified_search_urls)
         print(f"[crew] raw_dict filtered: {len(verified_raw_evidence)} evidence items, source_index: {raw_dict['source_index']}", flush=True)
@@ -1030,10 +1171,20 @@ def run_research_crew(case_id: int, case_context: str) -> tuple[str, str]:
         else:
             ai_reasoning = str(raw_summary)
     else:
-        # Fallback: raw LLM output could not be parsed into structured JSON.
-        # Sanitize to strip any hallucinated URLs outside the whitelist.
-        memo_text = _strip_non_whitelisted_urls(str(result))
-        ai_reasoning = ""
+        # Fallback: check if raw text contains JSON or can be repaired
+        raw_text = str(result).strip()
+        emergency_parsed = _extract_json_from_raw_text(raw_text)
+        if emergency_parsed:
+            emergency_obj = _normalize_to_research_output(emergency_parsed, url_to_title_map=url_to_title_map)
+            if emergency_obj:
+                memo_text = _format_research_output(emergency_obj)
+                ai_reasoning = emergency_obj.liability_summary or ""
+            else:
+                memo_text = _format_raw_research_dict(emergency_parsed)
+                ai_reasoning = str(emergency_parsed.get("liability_summary", ""))
+        else:
+            memo_text = _strip_non_whitelisted_urls(raw_text)
+            ai_reasoning = ""
 
     for marker in _CONTAMINATION_MARKERS:
         memo_text = re.sub(re.escape(marker), "", memo_text, flags=re.IGNORECASE)
