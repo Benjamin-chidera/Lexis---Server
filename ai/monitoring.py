@@ -33,9 +33,17 @@ from langfuse.callback import CallbackHandler
 
 load_dotenv()
 
-def get_langfuse_handler():
+def get_langfuse_handler(
+    session_id: str | None = None,
+    user_id: str | None = None,
+    trace_name: str | None = None,
+    tags: list[str] | None = None,
+    metadata: dict | None = None,
+):
     """
     Initializes and returns the Langfuse CallbackHandler if API keys are configured.
+    Attaches optional session_id, user_id, trace_name, and tags to populate
+    the Langfuse Sessions and Users dashboards.
     Returns None otherwise.
     """
     public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
@@ -46,6 +54,12 @@ def get_langfuse_handler():
         return CallbackHandler(
             public_key=public_key,
             secret_key=secret_key,
-            host=host
+            host=host,
+            session_id=str(session_id) if session_id is not None else None,
+            user_id=str(user_id) if user_id is not None else None,
+            trace_name=trace_name,
+            tags=tags,
+            metadata=metadata,
         )
     return None
+
