@@ -14,12 +14,12 @@ services:
     build: .
     container_name: legal-assistant-api
     ports:
-      - "3002:3002"
+      - "3002:8000"
     env_file: .env
     environment:
       - REDIS_URL=redis://redis:6379
       - ENVIRONMENT=development
-      - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse-server:3000}
+      - LANGFUSE_HOST=http://langfuse-server:3000
     volumes:
       - .:/app
       - /app/.venv
@@ -34,7 +34,7 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
       - ENVIRONMENT=development
-      - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse-server:3000}
+      - LANGFUSE_HOST=http://langfuse-server:3000
     volumes:
       - .:/app
       - /app/.venv

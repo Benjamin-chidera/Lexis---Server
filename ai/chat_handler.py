@@ -103,6 +103,7 @@ async def process_chat_message(case_id: int, user_content: str, sio, sid: str) -
             imgs_raw = (getattr(case, 'image_paths_json', None) or '').strip() or '[]'
             image_paths = json.loads(imgs_raw)
             
+            user_id = getattr(case, "user_id", None)
             context = case.context
 
         # Build progress emitter
@@ -130,13 +131,25 @@ async def process_chat_message(case_id: int, user_content: str, sio, sid: str) -
 
         # Step 4: Run the LangGraph pipeline in a thread executor
         from ai.monitoring import get_langfuse_handler
-        langfuse_handler = get_langfuse_handler()
+        langfuse_handler = get_langfuse_handler(
+            session_id=f"case-{case_id}",
+            user_id=f"user-{user_id}" if user_id else None,
+            trace_name=f"chat-case-{case_id}",
+            tags=["chat", f"case-{case_id}"],
+            metadata={"case_id": case_id, "user_id": user_id},
+        )
         config = {"callbacks": [langfuse_handler]} if langfuse_handler else {}
 
         final_state = await loop.run_in_executor(
             None,
             lambda: chat_graph.invoke(initial_state, config=config),
         )
+
+        if langfuse_handler:
+            try:
+                langfuse_handler.langfuse.flush()
+            except Exception as flush_err:
+                print(f"[chat_handler] Langfuse flush error: {flush_err}")
 
         ai_response_text = final_state.get("response", "")
         citation = final_state.get("citation", None)

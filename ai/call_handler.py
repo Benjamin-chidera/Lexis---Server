@@ -32,6 +32,7 @@ from sqlmodel import Session, select
 
 from database import engine
 from models import Case, CaseMessage, Alert
+from .model_providers import VOICE_MODEL, get_voice_chat_model
 
 load_dotenv()
 
@@ -45,8 +46,11 @@ STT_MODEL = "voxtral-mini-latest"
 # TTS model for generating AI speech (Voxtral Mini Text-to-Speech)
 TTS_MODEL = "voxtral-mini-tts-2603"
 
-# Chat model for generating AI text responses (Tier-allowed and fast for voice)
+# Fallback chat model on Mistral if the primary NVIDIA voice model fails
 CHAT_MODEL = "ministral-8b-latest"
+
+# Max tokens for spoken responses to keep answers short and snappy
+VOICE_MAX_TOKENS = 100
 
 # Preset voice ID for TTS output
 TTS_VOICE_ID = "gb_jane_neutral"
@@ -594,42 +598,41 @@ class CallSession:
                 "content": msg["content"]
             })
 
-        # Run the chat completion in a thread executor (blocking API call)
+        # Try the fast NVIDIA voice model first. If it fails or times out (10s),
+        # fall back to Mistral so the call does not go silent.
         loop = asyncio.get_event_loop()
         try:
-            response = await loop.run_in_executor(
-                None,
-                lambda: self.client.chat.complete(
-                    model=CHAT_MODEL,
-                    messages=messages,
-                    temperature=0.6,
-                    max_tokens=100,  # Snappy, low-latency responses for voice
-                )
+            return await loop.run_in_executor(
+                None, lambda: self._complete_with_nvidia(messages)
             )
-
-            # Extract the response text
-            if response and response.choices:
-                return response.choices[0].message.content
-        except Exception as error:
-            print(f"[call] Primary voice chat model {CHAT_MODEL} failed: {error}. Falling back to NVIDIA NIM...")
+        except Exception as nvidia_error:
+            print(f"[call] Primary voice chat model {VOICE_MODEL} failed: {nvidia_error}. Falling back to Mistral {CHAT_MODEL}...")
             try:
-                from .model_providers import get_chat_model
-                from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-                nvidia_llm = get_chat_model()
-                lc_messages = []
-                for m in messages:
-                    if m["role"] == "system":
-                        lc_messages.append(SystemMessage(content=m["content"]))
-                    elif m["role"] == "user":
-                        lc_messages.append(HumanMessage(content=m["content"]))
-                    elif m["role"] == "assistant":
-                        lc_messages.append(AIMessage(content=m["content"]))
-                res = await loop.run_in_executor(None, lambda: nvidia_llm.invoke(lc_messages))
-                return res.content
-            except Exception as fb_err:
-                print(f"[call] Fallback voice chat model failed: {fb_err}")
-                raise error
+                return await loop.run_in_executor(
+                    None, lambda: self._complete_with_mistral(messages)
+                )
+            except Exception as mistral_error:
+                sentry_sdk.capture_exception(mistral_error)
+                print(f"[call] Fallback voice chat model {CHAT_MODEL} failed: {mistral_error}")
+                raise nvidia_error
 
+    def _complete_with_nvidia(self, messages: list) -> str:
+        """Blocking call to the NVIDIA voice model. Raises on error or timeout."""
+        voice_llm = get_voice_chat_model()
+        # max_tokens keeps answers short and snappy for voice
+        response = voice_llm.invoke(messages, max_tokens=VOICE_MAX_TOKENS)
+        return response.content.strip()
+
+    def _complete_with_mistral(self, messages: list) -> str:
+        """Blocking call to the Mistral chat model. Raises on error."""
+        response = self.client.chat.complete(
+            model=CHAT_MODEL,
+            messages=messages,
+            temperature=0.6,
+            max_tokens=VOICE_MAX_TOKENS,
+        )
+        if response and response.choices:
+            return response.choices[0].message.content
         return "I'm having trouble getting an answer right now."
 
     async def _generate_speech(self, text: str) -> Optional[str]:
